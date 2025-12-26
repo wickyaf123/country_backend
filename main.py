@@ -67,9 +67,23 @@ app = FastAPI(
 )
 
 # Add middleware
+# CORS: Always allow the Vercel frontend + local development
+allowed_origins = [
+    "http://localhost:8080",
+    "http://localhost:8081", 
+    "http://localhost:5173",
+    "http://127.0.0.1:8080",
+    "http://127.0.0.1:8081",
+    "http://127.0.0.1:5173",
+    "https://country-frontend-liart.vercel.app"
+]
+
+if settings.debug:
+    allowed_origins = ["*"]  # Allow all in debug mode
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8080", "http://localhost:8081", "http://localhost:5173", "http://127.0.0.1:8080", "http://127.0.0.1:8081", "http://127.0.0.1:5173", "https://country-frontend-liart.vercel.app"] if not settings.debug else ["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
@@ -78,7 +92,7 @@ app.add_middleware(
 
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=["*"] if settings.debug else ["localhost", "127.0.0.1"]
+    allowed_hosts=["*"]  # Allow all hosts (Railway proxies requests)
 )
 
 # Include API routers - Story Intelligence Only
