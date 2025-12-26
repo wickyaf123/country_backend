@@ -403,20 +403,22 @@ async def get_rss_leads(
     limit: int = Query(default=50, ge=1, le=100),
     db: AsyncSession = Depends(get_db)
 ):
-    """Get recent RSS story leads."""
+    """Get recent RSS story leads with keyword information."""
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     
+    # Join with TrendKeyword to get keyword name
     result = await db.execute(
-        select(RSSStoryLead)
+        select(RSSStoryLead, TrendKeyword)
+        .outerjoin(TrendKeyword, RSSStoryLead.matched_trend_keyword_id == TrendKeyword.id)
         .where(RSSStoryLead.fetched_at >= cutoff)
         .where(RSSStoryLead.country_music_relevance >= min_relevance)
         .order_by(desc(RSSStoryLead.published_at))
         .limit(limit)
     )
-    leads = result.scalars().all()
+    rows = result.all()
     
     return {
-        "total": len(leads),
+        "total": len(rows),
         "leads": [
             {
                 "id": lead.id,
@@ -425,9 +427,12 @@ async def get_rss_leads(
                 "source": lead.source_name,
                 "published_at": lead.published_at.isoformat() if lead.published_at else None,
                 "relevance": lead.country_music_relevance,
-                "keywords": lead.extracted_keywords
+                "keywords": lead.extracted_keywords,
+                "matched_keyword_id": lead.matched_trend_keyword_id,
+                "matched_keyword_name": keyword.keyword if keyword else None,
+                "matched_story_angle_id": lead.matched_story_angle_id
             }
-            for lead in leads
+            for lead, keyword in rows
         ]
     }
 
