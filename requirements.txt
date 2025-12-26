@@ -1,0 +1,59 @@
+# FastAPI and ASGI server
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+
+# Database
+sqlalchemy==2.0.23
+asyncpg==0.29.0
+alembic==1.12.1
+
+# HTTP client for external APIs
+httpx==0.25.2
+aiohttp==3.9.1
+
+# RSS/XML parsing (used by rss_realtime_service)
+feedparser==6.0.10
+beautifulsoup4==4.12.2
+lxml==4.9.3
+
+# Text processing and ML (used by Story Intelligence services)
+scikit-learn==1.3.2
+nltk==3.8.1
+spacy==3.7.2
+textdistance==4.6.0
+numpy>=1.26.0
+pandas==2.1.3
+
+# Caching (optional but recommended)
+redis==5.0.1
+
+# OpenAI integration (required)
+openai==1.3.7
+
+# Environment and configuration
+python-dotenv==1.0.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+
+# Utilities
+python-multipart==0.0.6
+python-dateutil==2.8.2
+pytz==2023.3
+
+# Logging
+structlog==23.2.0
+
+# Retry logic and resilience
+tenacity==8.2.3
+
+# Development dependencies
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+pytest-mock==3.12.0
+black==23.11.0
+isort==5.12.0
+mypy==1.7.1
+
+# Note: Using Supabase PostgreSQL only - no SQLite support
+# No scheduler dependencies - using manual triggers only
