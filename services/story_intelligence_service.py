@@ -40,10 +40,6 @@ class StoryIntelligenceService:
             run_id: Optional pipeline run ID for tracking
             keyword_limit: Number of keywords to process (default: 50)
         """
-        # region agent log
-        import json
-        with open('/Users/np1991/Desktop/country/.cursor/debug.log', 'a') as f: f.write(json.dumps({'location':'story_intelligence_service.py:43','message':'Pipeline START','data':{'run_id':run_id,'keyword_limit':keyword_limit},'timestamp':datetime.now(timezone.utc).timestamp()*1000,'sessionId':'debug-session','hypothesisId':'E'}) + '\n')
-        # endregion
         logger.info("Starting Story Intelligence hourly cycle", run_id=run_id, keyword_limit=keyword_limit)
         
         try:
@@ -58,15 +54,7 @@ class StoryIntelligenceService:
             if run_id:
                 await self._update_pipeline_run(db, run_id, "fetching_trends", f"Fetching top {keyword_limit} Google Trends")
             
-            # region agent log
-            import json
-            with open('/Users/np1991/Desktop/country/.cursor/debug.log', 'a') as f: f.write(json.dumps({'location':'story_intelligence_service.py:57','message':'BEFORE fetch_trending_keywords','data':{'keyword_limit':keyword_limit},'timestamp':datetime.now(timezone.utc).timestamp()*1000,'sessionId':'debug-session','hypothesisId':'A'}) + '\n')
-            # endregion
             trends = await self.fetch_trending_keywords(limit=keyword_limit)
-            # region agent log
-            import json
-            with open('/Users/np1991/Desktop/country/.cursor/debug.log', 'a') as f: f.write(json.dumps({'location':'story_intelligence_service.py:58','message':'AFTER fetch_trending_keywords','data':{'trends_count':len(trends),'sample_trends':trends[:3] if trends else []},'timestamp':datetime.now(timezone.utc).timestamp()*1000,'sessionId':'debug-session','hypothesisId':'A'}) + '\n')
-            # endregion
             logger.info(f"Fetched {len(trends)} trending keywords")
             
             # Step 2: Save all fetched keywords to database
@@ -77,34 +65,18 @@ class StoryIntelligenceService:
             if run_id:
                 await self._update_pipeline_run(db, run_id, "analyzing_connections", f"Analyzing connections for {len(keyword_records)} keywords")
             
-            # region agent log
-            import json
-            with open('/Users/np1991/Desktop/country/.cursor/debug.log', 'a') as f: f.write(json.dumps({'location':'story_intelligence_service.py:68','message':'BEFORE analyze_all_connections','data':{'keyword_records_count':len(keyword_records)},'timestamp':datetime.now(timezone.utc).timestamp()*1000,'sessionId':'debug-session','hypothesisId':'B'}) + '\n')
-            # endregion
             connection_results = await self.analyze_all_connections(
                 db, keyword_records
             )
-            # region agent log
-            import json
-            with open('/Users/np1991/Desktop/country/.cursor/debug.log', 'a') as f: f.write(json.dumps({'location':'story_intelligence_service.py:71','message':'AFTER analyze_all_connections','data':{'connection_results_count':len(connection_results)},'timestamp':datetime.now(timezone.utc).timestamp()*1000,'sessionId':'debug-session','hypothesisId':'B'}) + '\n')
-            # endregion
             logger.info(f"Found {len(connection_results)} country music connections")
             
             # Step 4: Generate story angles for keywords with strong connections
             if run_id:
                 await self._update_pipeline_run(db, run_id, "generating_angles", f"Generating story angles for {len(connection_results)} connections")
             
-            # region agent log
-            import json
-            with open('/Users/np1991/Desktop/country/.cursor/debug.log', 'a') as f: f.write(json.dumps({'location':'story_intelligence_service.py:77','message':'BEFORE generate_story_angles','data':{'connection_results_count':len(connection_results)},'timestamp':datetime.now(timezone.utc).timestamp()*1000,'sessionId':'debug-session','hypothesisId':'D'}) + '\n')
-            # endregion
             story_angles = await self.generate_story_angles(
                 db, connection_results
             )
-            # region agent log
-            import json
-            with open('/Users/np1991/Desktop/country/.cursor/debug.log', 'a') as f: f.write(json.dumps({'location':'story_intelligence_service.py:80','message':'AFTER generate_story_angles','data':{'story_angles_count':len(story_angles)},'timestamp':datetime.now(timezone.utc).timestamp()*1000,'sessionId':'debug-session','hypothesisId':'D'}) + '\n')
-            # endregion
             logger.info(f"Generated {len(story_angles)} story angles")
             
             # Step 5: Fetch and match RSS articles to enrich story angles
@@ -124,10 +96,6 @@ class StoryIntelligenceService:
                 }
                 await self._update_pipeline_run(db, run_id, "completed", "Pipeline completed successfully", results=results)
             
-            # region agent log
-            import json
-            with open('/Users/np1991/Desktop/country/.cursor/debug.log', 'a') as f: f.write(json.dumps({'location':'story_intelligence_service.py:99','message':'Pipeline SUCCESS','data':{'trends_fetched':len(trends),'connections_found':len(connection_results),'story_angles_generated':len(story_angles),'rss_articles_matched':enriched_count},'timestamp':datetime.now(timezone.utc).timestamp()*1000,'sessionId':'debug-session','hypothesisId':'E'}) + '\n')
-            # endregion
             return {
                 "status": "success",
                 "trends_fetched": len(trends),
@@ -138,10 +106,6 @@ class StoryIntelligenceService:
             }
             
         except Exception as e:
-            # region agent log
-            import json
-            with open('/Users/np1991/Desktop/country/.cursor/debug.log', 'a') as f: f.write(json.dumps({'location':'story_intelligence_service.py:108','message':'Pipeline EXCEPTION','data':{'error':str(e),'error_type':type(e).__name__},'timestamp':datetime.now(timezone.utc).timestamp()*1000,'sessionId':'debug-session','hypothesisId':'E'}) + '\n')
-            # endregion
             logger.error("Story Intelligence cycle failed", error=str(e), exc_info=True)
             if run_id:
                 await self._update_pipeline_run(db, run_id, "failed", f"Error: {str(e)}")
@@ -558,21 +522,12 @@ DO NOT include markdown formatting, code blocks, or any text outside the JSON st
         """
         from services.connection_analyzer_service import connection_analyzer_service
         
-        # region agent log
-        import json
-        with open('/Users/np1991/Desktop/country/.cursor/debug.log', 'a') as f: f.write(json.dumps({'location':'story_intelligence_service.py:550','message':'analyze_all_connections START','data':{'keywords_count':len(keywords)},'timestamp':datetime.now(timezone.utc).timestamp()*1000,'sessionId':'debug-session','hypothesisId':'C'}) + '\n')
-        # endregion
-        
         connections = []
         batch_size = 50  # Increased batch size for high parallelism (requested 50 keywords)
         
         for i in range(0, len(keywords), batch_size):
             batch = keywords[i:i+batch_size]
             
-            # region agent log
-            import json
-            with open('/Users/np1991/Desktop/country/.cursor/debug.log', 'a') as f: f.write(json.dumps({'location':'story_intelligence_service.py:564','message':'Processing batch','data':{'batch_num':i//batch_size + 1,'batch_size':len(batch),'sample_keywords':[k.keyword for k in batch[:3]]},'timestamp':datetime.now(timezone.utc).timestamp()*1000,'sessionId':'debug-session','hypothesisId':'C'}) + '\n')
-            # endregion
             logger.info(f"Processing batch {i//batch_size + 1}/{(len(keywords) + batch_size - 1)//batch_size}")
             
             # Process batch in parallel
@@ -585,11 +540,6 @@ DO NOT include markdown formatting, code blocks, or any text outside the JSON st
             
             batch_results = await asyncio.gather(*tasks, return_exceptions=True)
             
-            # region agent log
-            import json
-            with open('/Users/np1991/Desktop/country/.cursor/debug.log', 'a') as f: f.write(json.dumps({'location':'story_intelligence_service.py:577','message':'Batch results received','data':{'batch_num':i//batch_size + 1,'results_count':len(batch_results),'exceptions_count':sum(1 for r in batch_results if isinstance(r, Exception)),'empty_results':sum(1 for r in batch_results if not isinstance(r, Exception) and not r)},'timestamp':datetime.now(timezone.utc).timestamp()*1000,'sessionId':'debug-session','hypothesisId':'C'}) + '\n')
-            # endregion
-            
             # Save connections that were found
             for keyword, result in zip(batch, batch_results):
                 if isinstance(result, Exception):
@@ -598,10 +548,18 @@ DO NOT include markdown formatting, code blocks, or any text outside the JSON st
                         keyword=keyword.keyword,
                         error=str(result)
                     )
+                    # Set parsing status to failed
+                    keyword.parsing_status = "failed"
                     continue
                 
-                if result:  # Has connections
-                    for conn in result:
+                # Result is now a tuple of (connections, parsing_status)
+                conn_list, parsing_status = result
+                
+                # Update keyword with parsing status
+                keyword.parsing_status = parsing_status
+                
+                if conn_list:  # Has connections
+                    for conn in conn_list:
                         connection = CountryMusicConnection(
                             keyword_id=keyword.id,
                             degree=conn["degree"],
@@ -620,11 +578,6 @@ DO NOT include markdown formatting, code blocks, or any text outside the JSON st
             # Brief pause between batches
             if i + batch_size < len(keywords):
                 await asyncio.sleep(2)
-        
-        # region agent log
-        import json
-        with open('/Users/np1991/Desktop/country/.cursor/debug.log', 'a') as f: f.write(json.dumps({'location':'story_intelligence_service.py:610','message':'analyze_all_connections COMPLETE','data':{'total_connections':len(connections)},'timestamp':datetime.now(timezone.utc).timestamp()*1000,'sessionId':'debug-session','hypothesisId':'C'}) + '\n')
-        # endregion
         
         return connections
     
