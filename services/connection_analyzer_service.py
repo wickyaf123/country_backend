@@ -2,6 +2,7 @@
 
 from typing import List, Dict, Any
 import structlog
+from json_repair import repair_json
 
 logger = structlog.get_logger()
 
@@ -92,14 +93,18 @@ class ConnectionAnalyzerService:
     
     def _repair_json(self, content: str) -> str:
         """
-        Repair common JSON formatting issues.
+        Repair malformed JSON using the json-repair library.
         
-        Fixes:
-        - Trailing commas in arrays and objects
-        - Unescaped quotes in strings
+        This library handles:
+        - Missing quotes around keys/values
+        - Trailing commas
         - Unmatched brackets/braces
         - Incomplete trailing objects
         - Common Unicode/escape sequence issues
+        - Single quotes instead of double quotes
+        - Python-style True/False/None values
+        - Comments in JSON
+        - And many more edge cases
         
         Args:
             content: The malformed JSON string
@@ -107,57 +112,17 @@ class ConnectionAnalyzerService:
         Returns:
             Repaired JSON string
         """
-        import re
+        logger.info("Attempting JSON repair with json-repair library", content_length=len(content))
         
-        logger.info("Attempting JSON repair", content_length=len(content))
-        
-        # 1. Remove trailing commas before closing brackets/braces
-        content = re.sub(r',(\s*[}\]])', r'\1', content)
-        
-        # 2. Fix incomplete trailing objects/arrays - find last complete structure
-        # Count braces to find matching pairs
-        brace_count = 0
-        bracket_count = 0
-        last_valid_pos = len(content)
-        
-        for i in range(len(content)):
-            if content[i] == '{':
-                brace_count += 1
-            elif content[i] == '}':
-                brace_count -= 1
-            elif content[i] == '[':
-                bracket_count += 1
-            elif content[i] == ']':
-                bracket_count -= 1
-            
-            # If we're balanced, mark this position
-            if brace_count == 0 and bracket_count == 0:
-                last_valid_pos = i + 1
-        
-        # Truncate to last valid position if unbalanced
-        if brace_count != 0 or bracket_count != 0:
-            content = content[:last_valid_pos]
-            logger.info("Truncated unbalanced JSON", new_length=len(content))
-        
-        # 3. Add missing closing braces/brackets if still needed
-        while brace_count > 0:
-            content += '}'
-            brace_count -= 1
-        while bracket_count > 0:
-            content += ']'
-            bracket_count -= 1
-        
-        # 4. Fix common escape sequence issues
-        # Replace invalid escape sequences
-        content = content.replace('\\\n', '\\n')
-        content = content.replace('\\\t', '\\t')
-        
-        # 5. Remove any leading/trailing whitespace and control characters
-        content = content.strip()
-        
-        logger.info("JSON repair complete", repaired_length=len(content))
-        
-        return content
+        try:
+            # Use json-repair library for robust repair
+            repaired = repair_json(content)
+            logger.info("JSON repair complete", repaired_length=len(repaired))
+            return repaired
+        except Exception as e:
+            logger.error("JSON repair failed", error=str(e))
+            # Return original content as fallback
+            return content
     
     def _extract_partial_connections(self, content: str) -> List[Dict[str, Any]]:
         """

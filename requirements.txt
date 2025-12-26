@@ -45,6 +45,9 @@ structlog==23.2.0
 # Retry logic and resilience
 tenacity==8.2.3
 
+# JSON repair
+json-repair==0.25.0
+
 # Development dependencies
 pytest==7.4.3
 pytest-asyncio==0.21.1
