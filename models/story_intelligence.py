@@ -23,6 +23,8 @@ class TrendKeyword(Base):
     detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     apify_run_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     related_queries: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    parsing_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, default="success")
+    # Values: "success", "repaired", "partial", "failed"
     
     # Relationships
     connections: Mapped[list["CountryMusicConnection"]] = relationship(

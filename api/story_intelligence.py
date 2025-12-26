@@ -160,6 +160,7 @@ async def get_trending_keywords(
             "search_volume": row.TrendKeyword.search_volume,
             "trend_rank": row.TrendKeyword.trend_rank,
             "connection_count": row.connection_count,
+            "parsing_status": row.TrendKeyword.parsing_status,
             "detected_at": row.TrendKeyword.detected_at.isoformat()
         }
         for row in rows

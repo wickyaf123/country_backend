@@ -17,7 +17,7 @@ class ConnectionAnalyzerService:
         self,
         keyword: str,
         deep_research: bool = False
-    ) -> List[Dict[str, Any]]:
+    ) -> tuple[List[Dict[str, Any]], str]:
         """
         Find multi-degree connections with ONE comprehensive query.
         
@@ -31,8 +31,9 @@ class ConnectionAnalyzerService:
             deep_research: If True, uses sonar-deep-research model (slower, more thorough)
         
         Returns:
-            List of connections with degree, type, entity, description, confidence,
-            connection chain, and evidence.
+            Tuple of (List of connections with degree, type, entity, description, confidence,
+            connection chain, and evidence, parsing_status)
+            parsing_status can be: "success", "repaired", "partial", "failed"
         """
         logger.info(
             "Finding country music connections (comprehensive single query)", 
@@ -41,8 +42,8 @@ class ConnectionAnalyzerService:
         )
         
         try:
-            # Execute comprehensive search
-            all_connections = await self._search_comprehensive_connections(
+            # Execute comprehensive search (now returns tuple)
+            all_connections, parsing_status = await self._search_comprehensive_connections(
                 keyword=keyword, 
                 deep_research=deep_research
             )
@@ -59,6 +60,7 @@ class ConnectionAnalyzerService:
                 keyword=keyword,
                 total_queries=1,
                 connections_found=len(all_connections),
+                parsing_status=parsing_status,
                 degrees_found={
                     1: len([c for c in all_connections if c['degree'] == 1]),
                     2: len([c for c in all_connections if c['degree'] == 2]),
@@ -66,11 +68,12 @@ class ConnectionAnalyzerService:
                 }
             )
             
-            return all_connections
+            # Return connections with parsing status attached
+            return all_connections, parsing_status
             
         except Exception as e:
             logger.error("Connection analysis failed", keyword=keyword, error=str(e))
-            return []
+            return [], "failed"
     
     def _format_connection_chain(self, keyword: str, connection: Dict) -> str:
         """
@@ -87,11 +90,197 @@ class ConnectionAnalyzerService:
         else:  # degree 3
             return f"{keyword} → [Cultural/Lifestyle] → {entity} → Country Music"
     
+    def _repair_json(self, content: str) -> str:
+        """
+        Repair common JSON formatting issues.
+        
+        Fixes:
+        - Trailing commas in arrays and objects
+        - Unescaped quotes in strings
+        - Unmatched brackets/braces
+        - Incomplete trailing objects
+        - Common Unicode/escape sequence issues
+        
+        Args:
+            content: The malformed JSON string
+        
+        Returns:
+            Repaired JSON string
+        """
+        import re
+        
+        logger.info("Attempting JSON repair", content_length=len(content))
+        
+        # 1. Remove trailing commas before closing brackets/braces
+        content = re.sub(r',(\s*[}\]])', r'\1', content)
+        
+        # 2. Fix incomplete trailing objects/arrays - find last complete structure
+        # Count braces to find matching pairs
+        brace_count = 0
+        bracket_count = 0
+        last_valid_pos = len(content)
+        
+        for i in range(len(content)):
+            if content[i] == '{':
+                brace_count += 1
+            elif content[i] == '}':
+                brace_count -= 1
+            elif content[i] == '[':
+                bracket_count += 1
+            elif content[i] == ']':
+                bracket_count -= 1
+            
+            # If we're balanced, mark this position
+            if brace_count == 0 and bracket_count == 0:
+                last_valid_pos = i + 1
+        
+        # Truncate to last valid position if unbalanced
+        if brace_count != 0 or bracket_count != 0:
+            content = content[:last_valid_pos]
+            logger.info("Truncated unbalanced JSON", new_length=len(content))
+        
+        # 3. Add missing closing braces/brackets if still needed
+        while brace_count > 0:
+            content += '}'
+            brace_count -= 1
+        while bracket_count > 0:
+            content += ']'
+            bracket_count -= 1
+        
+        # 4. Fix common escape sequence issues
+        # Replace invalid escape sequences
+        content = content.replace('\\\n', '\\n')
+        content = content.replace('\\\t', '\\t')
+        
+        # 5. Remove any leading/trailing whitespace and control characters
+        content = content.strip()
+        
+        logger.info("JSON repair complete", repaired_length=len(content))
+        
+        return content
+    
+    def _extract_partial_connections(self, content: str) -> List[Dict[str, Any]]:
+        """
+        Extract individual valid connection objects from malformed JSON.
+        
+        Attempts to parse individual connection objects even when the overall
+        JSON structure is broken. Validates each connection has required fields.
+        
+        Args:
+            content: The malformed JSON string
+        
+        Returns:
+            List of successfully extracted and validated connections
+        """
+        import json
+        import re
+        
+        logger.info("Attempting partial connection extraction", content_length=len(content))
+        
+        connections = []
+        
+        # Strategy 1: Try to find the connections array even in malformed JSON
+        # Look for "connections":[...] pattern
+        connections_match = re.search(r'"connections"\s*:\s*\[(.*)\]', content, re.DOTALL)
+        if connections_match:
+            connections_array = connections_match.group(1)
+            
+            # Try to extract individual objects using regex
+            # Match complete object patterns like {"type":"...","entity":"...",...}
+            object_pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
+            object_matches = re.finditer(object_pattern, connections_array)
+            
+            for match in object_matches:
+                obj_str = match.group(0)
+                try:
+                    # Try to parse this individual object
+                    conn = json.loads(obj_str)
+                    
+                    # Validate required fields
+                    if self._validate_connection(conn):
+                        connections.append(conn)
+                        logger.debug("Successfully extracted connection", entity=conn.get('entity'))
+                    else:
+                        logger.debug("Invalid connection object (missing required fields)", obj=obj_str[:100])
+                        
+                except json.JSONDecodeError:
+                    logger.debug("Failed to parse individual connection object", obj=obj_str[:100])
+                    continue
+        
+        # Strategy 2: If no connections array found, try to find individual connection objects anywhere
+        if not connections:
+            object_pattern = r'\{\s*"type"\s*:\s*"[^"]*"\s*,\s*"entity"\s*:\s*"[^"]*"[^}]*\}'
+            object_matches = re.finditer(object_pattern, content)
+            
+            for match in object_matches:
+                obj_str = match.group(0)
+                try:
+                    conn = json.loads(obj_str)
+                    if self._validate_connection(conn):
+                        connections.append(conn)
+                        logger.debug("Extracted standalone connection", entity=conn.get('entity'))
+                except json.JSONDecodeError:
+                    continue
+        
+        logger.info(
+            "Partial extraction complete",
+            extracted_count=len(connections),
+            valid_connections=len([c for c in connections if self._validate_connection(c)])
+        )
+        
+        return connections
+    
+    def _validate_connection(self, conn: Dict[str, Any]) -> bool:
+        """
+        Validate that a connection object has all required fields.
+        
+        Required fields:
+        - entity: str
+        - description: str
+        - degree: int (1, 2, or 3)
+        - confidence: float (0.0 - 1.0)
+        
+        Args:
+            conn: Connection dictionary to validate
+        
+        Returns:
+            True if valid, False otherwise
+        """
+        if not isinstance(conn, dict):
+            return False
+        
+        # Check required fields exist and have correct types
+        if 'entity' not in conn or not isinstance(conn['entity'], str) or not conn['entity'].strip():
+            return False
+        
+        if 'description' not in conn or not isinstance(conn['description'], str) or not conn['description'].strip():
+            return False
+        
+        if 'degree' not in conn or not isinstance(conn['degree'], int) or conn['degree'] not in [1, 2, 3]:
+            return False
+        
+        if 'confidence' not in conn:
+            # Set default confidence if missing
+            conn['confidence'] = 0.7
+        elif not isinstance(conn['confidence'], (int, float)) or not (0.0 <= conn['confidence'] <= 1.0):
+            return False
+        
+        # Type is optional but should be string if present
+        if 'type' in conn and not isinstance(conn['type'], str):
+            return False
+        
+        # Evidence is optional but should be list if present
+        if 'evidence' in conn and not isinstance(conn['evidence'], list):
+            conn['evidence'] = []
+        
+        return True
+    
     async def _search_comprehensive_connections(
         self,
         keyword: str,
-        deep_research: bool = False
-    ) -> List[Dict[str, Any]]:
+        deep_research: bool = False,
+        retry_count: int = 0
+    ) -> tuple[List[Dict[str, Any]], str]:
         """
         Single comprehensive query covering all angles and degrees.
         Much faster than 9 separate queries (v2 approach).
@@ -104,9 +293,11 @@ class ConnectionAnalyzerService:
         Args:
             keyword: The keyword to analyze
             deep_research: If True, uses sonar-deep-research model
+            retry_count: Number of retry attempts (0 = first attempt)
         
         Returns:
-            List of connections across all degrees
+            Tuple of (List of connections across all degrees, parsing_status)
+            parsing_status can be: "success", "repaired", "partial", "failed"
         """
         from services.perplexity_service import perplexity_service
         from datetime import datetime
@@ -224,6 +415,7 @@ Return RAW JSON only:
                 keyword=keyword,
                 connections_found=len(connections),
                 model=result.get("model_used"),
+                parsing_status="success",
                 degrees={
                     1: len([c for c in connections if c.get('degree') == 1]),
                     2: len([c for c in connections if c.get('degree') == 2]),
@@ -231,16 +423,95 @@ Return RAW JSON only:
                 }
             )
             
-            return connections
+            return connections, "success"
             
         except json.JSONDecodeError as e:
-            logger.error(
-                "Failed to parse JSON from comprehensive search",
+            logger.warning(
+                "JSON parse error",
                 keyword=keyword,
+                retry_count=retry_count,
                 error=str(e),
+                error_pos=f"line {e.lineno} col {e.colno}",
                 raw_content=content[:500] if 'content' in locals() else "N/A"
             )
-            return []
+            
+            # First attempt failed - try repair and retry
+            if retry_count == 0:
+                logger.info("Attempting JSON repair and retry", keyword=keyword)
+                
+                try:
+                    # Apply repair logic
+                    repaired_content = self._repair_json(content)
+                    
+                    # Try to parse repaired JSON
+                    data = json.loads(repaired_content)
+                    connections = data.get("connections", [])
+                    
+                    # Add Perplexity citations if missing
+                    for conn in connections:
+                        if not conn.get("evidence") or len(conn.get("evidence", [])) == 0:
+                            conn["evidence"] = result.get("citations", [])
+                    
+                    logger.info(
+                        "JSON repair successful",
+                        keyword=keyword,
+                        connections_found=len(connections),
+                        parsing_status="repaired"
+                    )
+                    
+                    return connections, "repaired"
+                    
+                except json.JSONDecodeError as repair_error:
+                    logger.warning(
+                        "JSON repair failed, attempting partial extraction",
+                        keyword=keyword,
+                        repair_error=str(repair_error)
+                    )
+                    
+                    # Repair failed - try partial extraction
+                    connections = self._extract_partial_connections(content)
+                    
+                    if connections:
+                        logger.info(
+                            "Partial extraction successful",
+                            keyword=keyword,
+                            connections_found=len(connections),
+                            parsing_status="partial"
+                        )
+                        return connections, "partial"
+                    else:
+                        logger.error(
+                            "All parsing attempts failed",
+                            keyword=keyword,
+                            parsing_status="failed"
+                        )
+                        return [], "failed"
+            
+            # Second attempt (retry_count >= 1) - go straight to partial extraction
+            else:
+                logger.warning(
+                    "Retry also failed, attempting partial extraction",
+                    keyword=keyword
+                )
+                
+                connections = self._extract_partial_connections(content)
+                
+                if connections:
+                    logger.info(
+                        "Partial extraction successful on retry",
+                        keyword=keyword,
+                        connections_found=len(connections),
+                        parsing_status="partial"
+                    )
+                    return connections, "partial"
+                else:
+                    logger.error(
+                        "All parsing attempts failed on retry",
+                        keyword=keyword,
+                        parsing_status="failed"
+                    )
+                    return [], "failed"
+                    
         except Exception as e:
             logger.error(
                 "Comprehensive search failed",

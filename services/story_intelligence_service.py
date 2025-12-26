@@ -552,6 +552,17 @@ DO NOT include markdown formatting, code blocks, or any text outside the JSON st
                     keyword.parsing_status = "failed"
                     continue
                 
+                # Add defensive check for tuple unpacking
+                if not isinstance(result, tuple) or len(result) != 2:
+                    logger.error(
+                        "Invalid result format from connection analyzer",
+                        keyword=keyword.keyword,
+                        result_type=type(result).__name__,
+                        result_value=str(result)[:200]
+                    )
+                    keyword.parsing_status = "failed"
+                    continue
+                
                 # Result is now a tuple of (connections, parsing_status)
                 conn_list, parsing_status = result
                 
