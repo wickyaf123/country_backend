@@ -11,7 +11,10 @@ class ConnectionAnalyzerService:
     """
     Analyzes 1st, 2nd, and 3rd degree connections from keywords to country music.
     
-    Uses Perplexity AI with comprehensive single-query approach for maximum efficiency.
+    Uses Perplexity AI with 3 specialized sequential calls (one per degree) for thorough coverage:
+    - Degree 1: The "Official Record" - verified industry connections
+    - Degree 2: The "Network Chain" - social graph and proximity
+    - Degree 3: The "Cultural Profiler" - lifestyle signals and audience overlap
     """
     
     async def find_country_music_connections(
@@ -20,12 +23,12 @@ class ConnectionAnalyzerService:
         deep_research: bool = False
     ) -> tuple[List[Dict[str, Any]], str]:
         """
-        Find multi-degree connections with ONE comprehensive query.
+        Find multi-degree connections using 3 specialized sequential searches.
         
-        Uses Perplexity AI to search all 3 degrees simultaneously:
-        - Degree 1: Direct country music connections (artists, venues, labels)
-        - Degree 2: One step removed (media, social, festivals)
-        - Degree 3: Cultural/lifestyle connections (values, business, patriotic)
+        Makes 3 Perplexity AI calls, each optimized for its degree:
+        - Degree 1: The "Official Record" - verified credits, charts, performances
+        - Degree 2: The "Network Chain" - social graph, bridge people, insider venues
+        - Degree 3: The "Cultural Profiler" - brand signals, lifestyle, values alignment
         
         Args:
             keyword: The keyword to analyze
@@ -37,7 +40,7 @@ class ConnectionAnalyzerService:
             parsing_status can be: "success", "repaired", "partial", "failed"
         """
         logger.info(
-            "Finding country music connections (comprehensive single query)", 
+            "Finding country music connections (3 sequential degree searches)", 
             keyword=keyword,
             deep_research_mode=deep_research
         )
@@ -59,7 +62,7 @@ class ConnectionAnalyzerService:
             logger.info(
                 "Connection analysis complete",
                 keyword=keyword,
-                total_queries=1,
+                total_queries=3,  # Now uses 3 sequential calls (one per degree)
                 connections_found=len(all_connections),
                 parsing_status=parsing_status,
                 degrees_found={
@@ -240,6 +243,91 @@ class ConnectionAnalyzerService:
         
         return True
     
+    def _parse_perplexity_response(
+        self,
+        result: Dict[str, Any],
+        keyword: str,
+        degree: int
+    ) -> tuple[List[Dict[str, Any]], str]:
+        """
+        Parse Perplexity response and extract connections with robust error handling.
+        
+        Args:
+            result: The raw Perplexity API response
+            keyword: The keyword being analyzed (for logging)
+            degree: The degree being searched (for logging)
+        
+        Returns:
+            Tuple of (connections list, parsing_status)
+        """
+        import json
+        
+        content = result.get("content", "")
+        
+        # Remove <think> tags if present (Perplexity reasoning model)
+        if "</think>" in content:
+            content = content.split("</think>")[-1].strip()
+        
+        # Extract JSON from markdown if present
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
+        elif "```" in content:
+            parts = content.split("```")
+            if len(parts) >= 2:
+                content = parts[1].strip()
+        
+        # Try to find JSON object in the content
+        if not content.startswith("{"):
+            start = content.find("{")
+            end = content.rfind("}") + 1
+            if start != -1 and end > start:
+                content = content[start:end]
+        
+        try:
+            # Parse JSON
+            data = json.loads(content)
+            connections = data.get("connections", [])
+            
+            # Add Perplexity citations if missing
+            for conn in connections:
+                if not conn.get("evidence") or len(conn.get("evidence", [])) == 0:
+                    conn["evidence"] = result.get("citations", [])
+            
+            return connections, "success"
+            
+        except json.JSONDecodeError as e:
+            logger.warning(
+                "JSON parse error",
+                keyword=keyword,
+                degree=degree,
+                error=str(e),
+                raw_content=content[:500] if content else "N/A"
+            )
+            
+            # Try repair
+            try:
+                repaired_content = self._repair_json(content)
+                data = json.loads(repaired_content)
+                connections = data.get("connections", [])
+                
+                for conn in connections:
+                    if not conn.get("evidence") or len(conn.get("evidence", [])) == 0:
+                        conn["evidence"] = result.get("citations", [])
+                
+                logger.info("JSON repair successful", keyword=keyword, degree=degree)
+                return connections, "repaired"
+                
+            except json.JSONDecodeError:
+                # Try partial extraction
+                connections = self._extract_partial_connections(content)
+                
+                if connections:
+                    logger.info("Partial extraction successful", keyword=keyword, degree=degree)
+                    return connections, "partial"
+                else:
+                    logger.error("All parsing attempts failed", keyword=keyword, degree=degree)
+                    return [], "failed"
+                    
     async def _search_comprehensive_connections(
         self,
         keyword: str,
@@ -247,13 +335,12 @@ class ConnectionAnalyzerService:
         retry_count: int = 0
     ) -> tuple[List[Dict[str, Any]], str]:
         """
-        Single comprehensive query covering all angles and degrees.
-        Much faster than 9 separate queries (v2 approach).
+        Three-call approach: One specialized search per degree for thorough coverage.
         
-        Searches for all connection types in one Perplexity call:
-        - Degree 1: Direct artist/venue/label connections
-        - Degree 2: Media, social, festival connections
-        - Degree 3: Cultural, lifestyle, business, patriotic connections
+        Makes 3 sequential Perplexity calls:
+        - Degree 1: Direct artist/venue/label connections (The "Business")
+        - Degree 2: Network/Social connections (The "Hang" & Social Graph)
+        - Degree 3: Cultural/Lifestyle signals (The "Vibe" & Audience)
         
         Args:
             keyword: The keyword to analyze
@@ -266,224 +353,254 @@ class ConnectionAnalyzerService:
         """
         from services.perplexity_service import perplexity_service
         from datetime import datetime
-        import json
         
         current_year = datetime.now().year
         
-        # Comprehensive system prompt covering all connection types
-        system_prompt = f"""You are a JSON API that finds ALL country music connections in one comprehensive search.
+        all_connections = []
+        parsing_statuses = []
+        
+        # ===== DEGREE 1: THE OFFICIAL RECORD (The "Business") =====
+        system_prompt_d1 = f"""You are a Music Industry Archivist specializing in verified, official country music records.
 
-Return ONLY raw JSON (no markdown, no code blocks, no think tags).
+RETURN ONLY RAW JSON. No markdown, no code blocks, no <think> tags.
 
-SEARCH ALL 3 DEGREES simultaneously:
+YOUR MISSION: Find strict, verifiable proof of professional participation in the Country Music industry.
 
-**DEGREE 1** (Direct country music):
-- Artists, labels, venues, Billboard charts
-- Grand Ole Opry, Nashville locations (Ryman, Bluebird Cafe, Lower Broadway)
-- Recent collaborations, duets, songwriting
-- CMA/ACM/CMT awards appearances
+WHAT TO SEARCH:
+- **Credits**: ASCAP/BMI/SESAC songwriting credits, production credits, background vocal credits on country tracks.
+- **Charts**: Billboard Country charts, iTunes Country charts, Spotify Viral Country playlists.
+- **Official Stages**: Grand Ole Opry, Ryman Auditorium, CMA Fest Main Stage, ACM Awards, CMT Awards.
+- **Business**: Signed to Nashville-based label, official management by Nashville agencies.
+- **Family**: Immediate family members (parent, sibling, child) who are country artists.
 
-**DEGREE 2** (One step removed):
-- Media appearances (Bobby Bones, CMT, GAC, podcasts, Nashville radio)
-- Social media interactions with country artists (TikTok, Instagram)
-- Festival attendance (Stagecoach, CMA Fest, country concerts)
-- Backstage connections, fan interactions
+EXCLUSION RULE: Ignore social media rumors or unverified gossip. If there is no official record, return nothing.
 
-**DEGREE 3** (Cultural/lifestyle):
-- Lifestyle: hunting, fishing, trucks, rural/southern values, small town, blue collar
-- Business: Nashville investments, brand partnerships (Buc-ee's, Carhartt, Yeti)
-- Patriotic: military support, veterans, faith, conservative values, freedom themes, first responders
+For each connection:
+- type: "credits" | "charts" | "performance" | "business" | "family"
+- entity: Name of Artist, Label, Venue, or Song.
+- description: Specific details with dates. "Co-wrote 'Song Title' with [Artist] in 2023."
+- degree: 1
+- confidence: 0.9-1.0 (only high confidence for verified records)
+- evidence: [URLs to official sources]
 
-For each connection found, specify:
-- type: "artist"|"venue"|"label"|"person"|"brand"|"event"|"media"
-- entity: Name of connected entity
-- description: How they connect to country music
-- degree: 1|2|3 based on directness of connection
-- confidence: 0.0-1.0 (only include if >= 0.6)
-- evidence: [URLs]
-
-Output raw JSON:
-{{"connections":[{{"type":"artist","entity":"Name","description":"Details","degree":1,"confidence":0.85,"evidence":["url"]}}]}}
-
+Output JSON:
+{{"connections":[...]}}
 If none: {{"connections":[]}}
+"""
 
-Prefer recent (last 6 months) but include significant historical connections."""
+        query_d1 = f"""Find ALL verified DIRECT country music connections for "{keyword}".
 
-        query = f"""Find ALL "{keyword}" country music connections across all categories in one comprehensive search:
-
-**DIRECT CONNECTIONS (Degree 1):** 
-- Is {keyword} a country artist, signed to a country label, on Billboard country charts?
-- Performed at Nashville venues: Grand Ole Opry, Ryman, Bluebird Cafe, Lower Broadway bars?
-- Collaborations with Morgan Wallen, Luke Combs, Carrie Underwood, Jelly Roll, other country artists?
-- CMA Awards, ACM Awards, CMT Awards, Country Rebel features?
-- Released country album or single in {current_year}?
-
-**MEDIA & SOCIAL (Degree 2):**
-- Bobby Bones Show, CMT/GAC interviews, Nashville radio appearances?
-- Viral TikTok/Instagram content with country artists or at country events?
-- Festival attendance: Stagecoach, CMA Fest, country concerts, backstage access?
-- Country music podcast interviews, Stars & Stripes Sessions?
-
-**CULTURAL & LIFESTYLE (Degree 3):**
-- Outdoor lifestyle: hunting, fishing, trucks, rural/small town values?
-- Business: Nashville investments, brand deals with country artists, tour sponsorships?
-- Patriotic: military/veteran support, faith-based values, conservative alignment?
-- Lifestyle brands: Buc-ee's, Carhartt, Yeti associations?
-
-Search comprehensively. Include ALL connection types found with proper degree classification.
+SEARCH:
+- "{keyword} songwriting credits country music"
+- "{keyword} ASCAP BMI SESAC country"
+- "{keyword} Billboard country chart"
+- "{keyword} Grand Ole Opry performance"
+- "{keyword} Ryman Auditorium"
+- "{keyword} CMA Awards ACM Awards CMT Awards"
+- "{keyword} signed Nashville record label"
+- "{keyword} country album single release {current_year}"
+- "{keyword} collaboration Morgan Wallen Luke Combs Jelly Roll"
 
 Return RAW JSON only:
-{{"connections":[{{"type":"person","entity":"Name","description":"Connection","degree":2,"confidence":0.75,"evidence":["url"]}}]}}"""
+{{"connections":[{{"type":"credits","entity":"Song/Artist","description":"...","degree":1,"confidence":0.95,"evidence":["..."]}}]}}"""
 
-        try:
-            result = await perplexity_service.search_and_analyze(
-                query=query,
-                system_prompt=system_prompt,
-                temperature=0.2,
-                deep_research=deep_research
-            )
-            
-            # Parse JSON response
-            content = result["content"]
-            
-            # Remove <think> tags if present (Perplexity reasoning model)
-            if "</think>" in content:
-                content = content.split("</think>")[-1].strip()
-            
-            # Extract JSON from markdown if present
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            elif "```" in content:
-                parts = content.split("```")
-                if len(parts) >= 2:
-                    content = parts[1].strip()
-            
-            # Try to find JSON object in the content
-            if not content.startswith("{"):
-                # Look for first { to last }
-                start = content.find("{")
-                end = content.rfind("}") + 1
-                if start != -1 and end > start:
-                    content = content[start:end]
-            
-            # Parse JSON
-            data = json.loads(content)
-            connections = data.get("connections", [])
-            
-            # Add Perplexity citations if missing
-            for conn in connections:
-                if not conn.get("evidence") or len(conn.get("evidence", [])) == 0:
-                    conn["evidence"] = result.get("citations", [])
-            
+        # ===== DEGREE 2: THE NETWORK CHAIN (The "Hang" & Social Graph) =====
+        system_prompt_d2 = f"""You are a Social Network Investigator and Nashville Insider.
+
+RETURN ONLY RAW JSON. No markdown, no code blocks, no <think> tags.
+
+YOUR MISSION: Uncover the SOCIAL GRAPH and PROXIMITY connections. Find the "bridge people" and "the hang."
+
+WHAT TO SEARCH:
+
+**The "Bridge Person" (Triangulation):**
+- Trace through spouses, exes, best friends, dating history.
+- Example: Subject dates Person X → Person X is best friends with Morgan Wallen.
+- Look for connections to wives/partners of stars: Bunnie Xo, Brittany Aldean, KT Smith, Nicole Hocking.
+
+**The Podcast Circuit (Gateway Media):**
+- Appearances on: Bobby Bones Show, Bussin' With The Boys, Theo Von, Whiskey Riff, God's Country, Barstool Sports.
+
+**The "Dive Bar" Locator (Where Deals Happen):**
+- Spotted at: Losers Bar & Grill, Winners, The Listening Room, Red Door Saloon, Soho House Nashville, The Graduate Nashville.
+
+**Shared Teams:**
+- Same Nashville agent, manager, publicist, personal trainer, or stylist as country stars.
+
+**Viral Crossovers:**
+- TikTok duets/stitches with country artists.
+- Instagram stories featuring country stars at private events.
+
+For each connection:
+- type: "bridge_person" | "podcast" | "venue_sighting" | "shared_team" | "viral_crossover"
+- entity: Name of Person, Podcast, or Venue.
+- description: TELL THE STORY. "Photographed at [Venue] with [Person], who is married to [Country Star]."
+- degree: 2
+- confidence: 0.7-0.9
+- evidence: [URLs]
+
+Output JSON:
+{{"connections":[...]}}
+If none: {{"connections":[]}}
+"""
+
+        query_d2 = f"""Find ALL social and network connections for "{keyword}" to Country Music. Trace the social graph.
+
+SEARCH:
+- "{keyword} dating country singer"
+- "{keyword} ex-girlfriend ex-boyfriend country star"
+- "{keyword} best friend Nashville"
+- "{keyword} party with Morgan Wallen Luke Combs"
+- "{keyword} Bunnie Xo Brittany Aldean KT Smith" (spouse connections)
+- "{keyword} manager agent Nashville"
+- "{keyword} spotted Losers Bar Nashville"
+- "{keyword} Winners Bar Nashville"
+- "{keyword} Soho House Nashville"
+- "{keyword} Bobby Bones Show interview"
+- "{keyword} Bussin With The Boys podcast"
+- "{keyword} Theo Von podcast country"
+- "{keyword} Whiskey Riff feature"
+- "{keyword} TikTok duet country song"
+- "{keyword} Instagram story country artist"
+
+Return RAW JSON only:
+{{"connections":[{{"type":"bridge_person","entity":"Person X","description":"Dated Person X, who is the sister of Country Star Y.","degree":2,"confidence":0.85,"evidence":["..."]}}]}}"""
+
+        # ===== DEGREE 3: THE CULTURAL PROFILER (The "Vibe" & Lifestyle) =====
+        system_prompt_d3 = f"""You are a Sociologist and Lifestyle Marketer specializing in cultural signals.
+
+RETURN ONLY RAW JSON. No markdown, no code blocks, no <think> tags.
+
+YOUR MISSION: Identify CODED LIFESTYLE SIGNALS that align the subject with the Country Music audience. Look for brand deals, activities, values, and audience overlap.
+
+WHAT TO SEARCH:
+
+**The "Uniform" (Brand Signals):**
+- Sponsorship OR heavy organic use of: Carhartt, Yeti, Sitka, Mossy Oak, Tecovas, Seager, Kimes Ranch, King Ranch, Bass Pro Shops, Cabela's, Ariat, Wrangler, Boot Barn.
+- NOT just "wearing boots once." Look for partnerships or consistent public usage.
+
+**The "Activity" Profile (The Three Pillars):**
+- Motorsports: NASCAR, Monster Jam, Dirt Track Racing, off-roading.
+- Outdoors: Deep-sea fishing, Elk/Duck/Deer hunting, PBR Rodeo, NFR (National Finals Rodeo).
+- Rural Living: Farming, homesteading, owning land in "country wealth" zones (Leiper's Fork, Franklin TN, Bitterroot Valley MT, Jackson Hole WY).
+
+**The "Values" Alignment:**
+- Public support for Military/Veterans (Folds of Honor, USO).
+- First Responder advocacy.
+- Blue Collar/Working Class pride.
+- Faith-based initiatives.
+
+**Audience Mirror (Psychographic Overlap):**
+- "Yellowstone" fandom, UFC attendance, Barstool Sports universe.
+- Joe Rogan/Theo Von crossover (if discussing lifestyle, not just appearing).
+
+INFERENCE RULE: If the subject has zero music connections but checks 3+ boxes here, they are a HIGH-CONFIDENCE Degree 3 match.
+
+For each connection:
+- type: "brand_signal" | "outdoor_lifestyle" | "motorsports" | "values_alignment" | "audience_overlap" | "geographic"
+- entity: Name of Brand, Activity, Cause, or Location.
+- description: Specific context. "Official Yeti ambassador since 2022" or "Owns 500-acre ranch in Franklin, TN."
+- degree: 3
+- confidence: 0.6-0.85
+- evidence: [URLs]
+
+Output JSON:
+{{"connections":[...]}}
+If none: {{"connections":[]}}
+"""
+
+        query_d3 = f"""Find ALL cultural and lifestyle connections for "{keyword}" to the Country Music audience.
+
+SEARCH:
+- "{keyword} Carhartt sponsor", "{keyword} Yeti ambassador"
+- "{keyword} Tecovas cowboy boots", "{keyword} Seager clothing"
+- "{keyword} Bass Pro Shops", "{keyword} Cabela's"
+- "{keyword} hunting fishing brand deal"
+- "{keyword} NASCAR race attendance", "{keyword} Monster Jam"
+- "{keyword} duck hunting", "{keyword} elk hunting", "{keyword} deer hunting"
+- "{keyword} PBR rodeo", "{keyword} NFR National Finals Rodeo"
+- "{keyword} ranch property", "{keyword} farm land"
+- "{keyword} house Franklin Tennessee", "{keyword} property Leiper's Fork"
+- "{keyword} ranch Montana Wyoming Texas"
+- "{keyword} military veterans charity", "{keyword} Folds of Honor", "{keyword} USO"
+- "{keyword} first responders support", "{keyword} blue collar"
+- "{keyword} Yellowstone fan", "{keyword} Kevin Costner"
+- "{keyword} UFC fight attendance"
+- "{keyword} Barstool Sports"
+
+Return RAW JSON only:
+{{"connections":[{{"type":"brand_signal","entity":"Yeti","description":"Official Yeti ambassador, featured in their 2024 campaign.","degree":3,"confidence":0.8,"evidence":["..."]}}]}}"""
+
+        # ===== EXECUTE 3 SEQUENTIAL CALLS =====
+        degree_configs = [
+            {"degree": 1, "system_prompt": system_prompt_d1, "query": query_d1, "temperature": 0.1},
+            {"degree": 2, "system_prompt": system_prompt_d2, "query": query_d2, "temperature": 0.3},
+            {"degree": 3, "system_prompt": system_prompt_d3, "query": query_d3, "temperature": 0.3},
+        ]
+        
+        for config in degree_configs:
+            degree = config["degree"]
             logger.info(
-                "Comprehensive search complete",
+                f"Searching Degree {degree} connections",
                 keyword=keyword,
-                connections_found=len(connections),
-                model=result.get("model_used"),
-                parsing_status="success",
-                degrees={
-                    1: len([c for c in connections if c.get('degree') == 1]),
-                    2: len([c for c in connections if c.get('degree') == 2]),
-                    3: len([c for c in connections if c.get('degree') == 3])
-                }
+                degree=degree
             )
             
-            return connections, "success"
-            
-        except json.JSONDecodeError as e:
-            logger.warning(
-                "JSON parse error",
-                keyword=keyword,
-                retry_count=retry_count,
-                error=str(e),
-                error_pos=f"line {e.lineno} col {e.colno}",
-                raw_content=content[:500] if 'content' in locals() else "N/A"
-            )
-            
-            # First attempt failed - try repair and retry
-            if retry_count == 0:
-                logger.info("Attempting JSON repair and retry", keyword=keyword)
-                
-                try:
-                    # Apply repair logic
-                    repaired_content = self._repair_json(content)
-                    
-                    # Try to parse repaired JSON
-                    data = json.loads(repaired_content)
-                    connections = data.get("connections", [])
-                    
-                    # Add Perplexity citations if missing
-                    for conn in connections:
-                        if not conn.get("evidence") or len(conn.get("evidence", [])) == 0:
-                            conn["evidence"] = result.get("citations", [])
-                    
-                    logger.info(
-                        "JSON repair successful",
-                        keyword=keyword,
-                        connections_found=len(connections),
-                        parsing_status="repaired"
-                    )
-                    
-                    return connections, "repaired"
-                    
-                except json.JSONDecodeError as repair_error:
-                    logger.warning(
-                        "JSON repair failed, attempting partial extraction",
-                        keyword=keyword,
-                        repair_error=str(repair_error)
-                    )
-                    
-                    # Repair failed - try partial extraction
-                    connections = self._extract_partial_connections(content)
-                    
-                    if connections:
-                        logger.info(
-                            "Partial extraction successful",
-                            keyword=keyword,
-                            connections_found=len(connections),
-                            parsing_status="partial"
-                        )
-                        return connections, "partial"
-                    else:
-                        logger.error(
-                            "All parsing attempts failed",
-                            keyword=keyword,
-                            parsing_status="failed"
-                        )
-                        return [], "failed"
-            
-            # Second attempt (retry_count >= 1) - go straight to partial extraction
-            else:
-                logger.warning(
-                    "Retry also failed, attempting partial extraction",
-                    keyword=keyword
+            try:
+                result = await perplexity_service.search_and_analyze(
+                    query=config["query"],
+                    system_prompt=config["system_prompt"],
+                    temperature=config["temperature"],
+                    deep_research=deep_research
                 )
                 
-                connections = self._extract_partial_connections(content)
+                connections, status = self._parse_perplexity_response(result, keyword, degree)
                 
-                if connections:
-                    logger.info(
-                        "Partial extraction successful on retry",
-                        keyword=keyword,
-                        connections_found=len(connections),
-                        parsing_status="partial"
-                    )
-                    return connections, "partial"
-                else:
-                    logger.error(
-                        "All parsing attempts failed on retry",
-                        keyword=keyword,
-                        parsing_status="failed"
-                    )
-                    return [], "failed"
-                    
-        except Exception as e:
-            logger.error(
-                "Comprehensive search failed",
-                keyword=keyword,
-                error=str(e)
-            )
-            raise
+                # Ensure all connections have the correct degree
+                for conn in connections:
+                    conn["degree"] = degree
+                
+                all_connections.extend(connections)
+                parsing_statuses.append(status)
+                
+                logger.info(
+                    f"Degree {degree} search complete",
+                    keyword=keyword,
+                    connections_found=len(connections),
+                    parsing_status=status
+                )
+                
+            except Exception as e:
+                logger.error(
+                    f"Degree {degree} search failed",
+                    keyword=keyword,
+                    error=str(e)
+                )
+                parsing_statuses.append("failed")
+        
+        # Determine overall parsing status
+        if all(s == "success" for s in parsing_statuses):
+            overall_status = "success"
+        elif all(s == "failed" for s in parsing_statuses):
+            overall_status = "failed"
+        elif "success" in parsing_statuses or "repaired" in parsing_statuses:
+            overall_status = "partial"
+        else:
+            overall_status = "partial"
+        
+        logger.info(
+            "All degree searches complete",
+            keyword=keyword,
+            total_connections=len(all_connections),
+            overall_status=overall_status,
+            degrees={
+                1: len([c for c in all_connections if c.get('degree') == 1]),
+                2: len([c for c in all_connections if c.get('degree') == 2]),
+                3: len([c for c in all_connections if c.get('degree') == 3])
+            }
+        )
+        
+        return all_connections, overall_status
 
 
 # Global service instance

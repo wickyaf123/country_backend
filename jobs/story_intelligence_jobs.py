@@ -36,7 +36,7 @@ async def run_story_intelligence_cycle():
                 "Story Intelligence cycle completed",
                 trends=result["trends_fetched"],
                 connections=result["connections_found"],
-                angles=result["story_angles_generated"]
+                angles=result["angles_generated"]
             )
             
             # Get trending keywords for RSS matching

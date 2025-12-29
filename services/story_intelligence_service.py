@@ -91,7 +91,7 @@ class StoryIntelligenceService:
                 results = {
                     "trends_fetched": len(trends),
                     "connections_found": len(connection_results),
-                    "story_angles_generated": len(story_angles),
+                    "angles_generated": len(story_angles),
                     "rss_articles_matched": enriched_count
                 }
                 await self._update_pipeline_run(db, run_id, "completed", "Pipeline completed successfully", results=results)
@@ -100,7 +100,7 @@ class StoryIntelligenceService:
                 "status": "success",
                 "trends_fetched": len(trends),
                 "connections_found": len(connection_results),
-                "story_angles_generated": len(story_angles),
+                "angles_generated": len(story_angles),
                 "rss_articles_matched": enriched_count,
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
