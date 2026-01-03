@@ -26,6 +26,10 @@ class TrendKeywordResponse(BaseModel):
     trend_rank: Optional[int] = None
     detected_at: datetime
     connection_count: int = 0
+    relevance_tier: int = 3
+    relevance_score: float = 0.0
+    classification_reason: Optional[str] = None
+    country_music_connection: Optional[str] = None
     
     class Config:
         from_attributes = True
@@ -34,7 +38,7 @@ class TrendKeywordResponse(BaseModel):
 class ConnectionResponse(BaseModel):
     """Response model for a connection."""
     id: str
-    degree: int
+    relevance_tier: int
     connection_type: str
     connection_entity: str
     connection_description: str
@@ -62,7 +66,7 @@ class StoryAngleResponse(BaseModel):
     # Connection metadata
     connection_path: Optional[str] = None
     connection_explanation: Optional[str] = None
-    connection_degree: Optional[int] = None
+    relevance_tier: Optional[int] = None
     connection_type: Optional[str] = None
     # RSS articles
     rss_articles: List[RSSArticleBrief] = []
@@ -95,7 +99,7 @@ class ConnectionGraphNode(BaseModel):
     label: str
     type: str
     size: Optional[float] = None
-    degree: Optional[int] = None
+    relevance_tier: Optional[int] = None
 
 
 class ConnectionGraphEdge(BaseModel):
@@ -133,6 +137,7 @@ class StoryIntelligenceDashboard(BaseModel):
     trending_keywords: List[Dict[str, Any]]
     story_angles: List[StoryAngleResponse]
     total_angles: int
+    tier_breakdown: Dict[str, int]
     timestamp: str
 
 

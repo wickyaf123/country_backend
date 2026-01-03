@@ -30,7 +30,8 @@ class StoryIntelligenceService:
         self, 
         db: AsyncSession, 
         run_id: Optional[str] = None,
-        keyword_limit: int = 50
+        keyword_limit: int = 50,
+        trending_hours: int = 24
     ) -> Dict[str, Any]:
         """
         Main hourly cycle that runs the entire intelligence pipeline.
@@ -39,8 +40,14 @@ class StoryIntelligenceService:
             db: Database session
             run_id: Optional pipeline run ID for tracking
             keyword_limit: Number of keywords to process (default: 50)
+            trending_hours: Time window in hours (1-168, default: 24)
         """
-        logger.info("Starting Story Intelligence hourly cycle", run_id=run_id, keyword_limit=keyword_limit)
+        logger.info(
+            "Starting Story Intelligence hourly cycle", 
+            run_id=run_id, 
+            keyword_limit=keyword_limit,
+            trending_hours=trending_hours
+        )
         
         try:
             # Step 0: Clear ALL previous data for completely fresh start
@@ -52,10 +59,13 @@ class StoryIntelligenceService:
             
             # Step 1: Fetch only the trending keywords we need
             if run_id:
-                await self._update_pipeline_run(db, run_id, "fetching_trends", f"Fetching top {keyword_limit} Google Trends")
+                await self._update_pipeline_run(db, run_id, "fetching_trends", f"Fetching top {keyword_limit} Google Trends (past {trending_hours}h)")
             
-            trends = await self.fetch_trending_keywords(limit=keyword_limit)
-            logger.info(f"Fetched {len(trends)} trending keywords")
+            trends = await self.fetch_trending_keywords(
+                limit=keyword_limit,
+                trending_hours=trending_hours
+            )
+            logger.info(f"Fetched {len(trends)} trending keywords from past {trending_hours} hours")
             
             # Step 2: Save all fetched keywords to database
             keyword_records = await self.save_trend_keywords(db, trends)
@@ -447,31 +457,59 @@ DO NOT include markdown formatting, code blocks, or any text outside the JSON st
             logger.error("Deep research failed", angle_id=angle_id, error=str(e))
             raise
 
-    async def fetch_trending_keywords(self, limit: int = 100) -> List[Dict[str, Any]]:
+    async def fetch_trending_keywords(
+        self, 
+        limit: int = 100,
+        trending_hours: int = 24
+    ) -> List[Dict[str, Any]]:
         """
         Fetch top N trending keywords from Google Trends using Apify.
+        Sorted by search volume from Google Trends trending_now data.
         
         Args:
             limit: Number of trending keywords to fetch (default: 100)
+            trending_hours: Time window in hours (4, 24, 48, or 168, default: 24)
         """
         async with ApifyClient() as client:
-            # Trending Now - gets real-time trends
-            result = await client.run_google_trends_advanced(
-                scrape_type="trending_now",
-                geo="US",
-                trending_hours=24,
-                trending_language="en"
+            logger.info(
+                "Fetching trending keywords from Google Trends",
+                trending_hours=trending_hours,
+                limit=limit
             )
             
-            # Transform and sort by search volume
-            trends_data = client.transform_advanced_trends_data(result)
+            # Validate and map timeframe to new scraper's supported values
+            if trending_hours <= 4:
+                timeframe_hours = 4
+            elif trending_hours <= 24:
+                timeframe_hours = 24
+            elif trending_hours <= 48:
+                timeframe_hours = 48
+            else:
+                timeframe_hours = 168  # 7 days
             
-            # Sort by search volume and take top N (based on limit)
+            # Use new fast scraper for trending searches
+            trending_result = await client.run_google_trends_fast_trending(
+                country="US",
+                timeframe_hours=timeframe_hours,
+                use_proxy=True
+            )
+            
+            # Transform using new method
+            trends_data = client.transform_fast_trending_data(trending_result)
+            
+            # Sort by search volume and take top N
             sorted_trends = sorted(
                 trends_data,
                 key=lambda x: x.search_volume,
                 reverse=True
             )[:limit]
+            
+            logger.info(
+                f"Fetched {len(sorted_trends)} trending keywords",
+                top_keyword=sorted_trends[0].keyword if sorted_trends else None,
+                top_volume=sorted_trends[0].search_volume if sorted_trends else 0,
+                trending_hours=timeframe_hours
+            )
             
             return [
                 {
@@ -540,7 +578,7 @@ DO NOT include markdown formatting, code blocks, or any text outside the JSON st
             
             batch_results = await asyncio.gather(*tasks, return_exceptions=True)
             
-            # Save connections that were found
+            # Save connections that were found and update tier classification
             for keyword, result in zip(batch, batch_results):
                 if isinstance(result, Exception):
                     logger.error(
@@ -548,8 +586,10 @@ DO NOT include markdown formatting, code blocks, or any text outside the JSON st
                         keyword=keyword.keyword,
                         error=str(result)
                     )
-                    # Set parsing status to failed
+                    # Set parsing status to failed and tier to 3
                     keyword.parsing_status = "failed"
+                    keyword.relevance_tier = 3
+                    keyword.relevance_score = 0.0
                     continue
                 
                 # Add defensive check for tuple unpacking
@@ -561,6 +601,8 @@ DO NOT include markdown formatting, code blocks, or any text outside the JSON st
                         result_value=str(result)[:200]
                     )
                     keyword.parsing_status = "failed"
+                    keyword.relevance_tier = 3
+                    keyword.relevance_score = 0.0
                     continue
                 
                 # Result is now a tuple of (connections, parsing_status)
@@ -569,20 +611,49 @@ DO NOT include markdown formatting, code blocks, or any text outside the JSON st
                 # Update keyword with parsing status
                 keyword.parsing_status = parsing_status
                 
-                if conn_list:  # Has connections
-                    for conn in conn_list:
-                        connection = CountryMusicConnection(
-                            keyword_id=keyword.id,
-                            degree=conn["degree"],
-                            connection_type=conn["type"],
-                            connection_entity=conn["entity"],
-                            connection_description=conn["description"],
-                            confidence_score=conn["confidence"],
-                            evidence_sources={"sources": conn["evidence"]},
-                            connection_chain=conn.get("connection_chain")
+                # Extract tier classification from first connection
+                if conn_list:
+                    first_conn = conn_list[0]
+                    keyword.relevance_tier = first_conn.get("tier", 3)
+                    keyword.relevance_score = first_conn.get("confidence", 0.0)
+                    keyword.classification_reason = first_conn.get("description", "")
+                    keyword.country_music_connection = first_conn.get("country_music_connection")
+                    
+                    # Only create connection records for Tier 1 & 2
+                    if keyword.relevance_tier <= 2:
+                        for conn in conn_list:
+                            # Skip connections missing required fields
+                            if not conn.get("entity") or not conn.get("description"):
+                                logger.warning(
+                                    "Skipping connection with missing required fields",
+                                    keyword=keyword.keyword,
+                                    conn=conn
+                                )
+                                continue
+                                
+                            connection = CountryMusicConnection(
+                                keyword_id=keyword.id,
+                                relevance_tier=conn.get("tier", 2),
+                                connection_type=conn.get("type", "classification"),
+                                connection_entity=conn["entity"],
+                                connection_description=conn["description"],
+                                confidence_score=conn.get("confidence", 0.7),
+                                evidence_sources={"sources": conn.get("evidence", [])},
+                                connection_chain=conn.get("connection_chain")
+                            )
+                            db.add(connection)
+                            connections.append(connection)
+                    else:
+                        logger.info(
+                            "Skipping Tier 3 (unrelated) keyword - no connection record created",
+                            keyword=keyword.keyword,
+                            tier=keyword.relevance_tier
                         )
-                        db.add(connection)
-                        connections.append(connection)
+                else:
+                    # No connections found - mark as Tier 3
+                    keyword.relevance_tier = 3
+                    keyword.relevance_score = 0.0
+                    keyword.classification_reason = "No country music connection found"
             
             await db.commit()
             
@@ -598,18 +669,30 @@ DO NOT include markdown formatting, code blocks, or any text outside the JSON st
         connections: List[CountryMusicConnection]
     ) -> List[StoryAngle]:
         """
-        Generate story angles directly from network graph connections.
-        Simple representation of graph data - no AI generation.
-        Users can then select specific angles for deep research.
+        Generate story angles from Tier 1 & 2 connections only.
+        Tier 3 (unrelated) keywords are filtered out.
         """
         story_angles = []
         
+        # Query only Tier 1 & 2 connections from database
+        # Tier 3 connections are not created, but we filter to be safe
+        result = await db.execute(
+            select(CountryMusicConnection)
+            .where(CountryMusicConnection.relevance_tier <= 2)
+            .order_by(CountryMusicConnection.confidence_score.desc())
+        )
+        all_connections = result.scalars().all()
+        
+        logger.info(f"Generating story angles for {len(all_connections)} Tier 1 & 2 connections from database")
+        
         # Group connections by keyword
         keyword_connections = {}
-        for conn in connections:
+        for conn in all_connections:
             if conn.keyword_id not in keyword_connections:
                 keyword_connections[conn.keyword_id] = []
             keyword_connections[conn.keyword_id].append(conn)
+        
+        logger.info(f"Found connections for {len(keyword_connections)} unique keywords")
         
         # Create story angles from connections
         for keyword_id, conns in keyword_connections.items():
@@ -620,6 +703,20 @@ DO NOT include markdown formatting, code blocks, or any text outside the JSON st
             keyword = result.scalar_one_or_none()
             
             if not keyword:
+                logger.error(
+                    "CRITICAL: Keyword not found for connection! Database consistency issue.",
+                    keyword_id=keyword_id,
+                    connection_count=len(conns)
+                )
+                continue
+            
+            # Skip Tier 3 keywords (double-check filter)
+            if keyword.relevance_tier > 2:
+                logger.info(
+                    "Skipping Tier 3 keyword in story angle generation",
+                    keyword=keyword.keyword,
+                    tier=keyword.relevance_tier
+                )
                 continue
             
             # Sort by confidence score (highest first)
@@ -632,13 +729,13 @@ DO NOT include markdown formatting, code blocks, or any text outside the JSON st
                 
                 # Calculate scores from connection data
                 urgency_score = min(conn.confidence_score * 1.2, 1.0)  # Boost high confidence
-                uniqueness_score = max(1.0 - (conn.degree * 0.15), 0.4)  # Closer = more unique
+                uniqueness_score = max(1.0 - (conn.relevance_tier * 0.15), 0.4)  # Tier 1 = more unique
                 engagement_potential = conn.confidence_score
                 
                 # Format key facts from connection chain
                 key_facts = {
                     "connection_chain": conn.connection_chain,
-                    "degree": conn.degree,
+                    "relevance_tier": conn.relevance_tier,
                     "connection_type": conn.connection_type,
                     "entity": conn.connection_entity
                 }
@@ -657,7 +754,15 @@ DO NOT include markdown formatting, code blocks, or any text outside the JSON st
                 story_angles.append(story_angle)
         
         await db.commit()
-        logger.info(f"Generated {len(story_angles)} story angles from network graph")
+        
+        logger.info(
+            "Story angle generation complete",
+            total_connections=len(all_connections),
+            unique_keywords=len(keyword_connections),
+            story_angles_generated=len(story_angles),
+            angles_per_keyword=len(story_angles) / len(keyword_connections) if keyword_connections else 0
+        )
+        
         return story_angles
     
     async def enrich_angles_with_rss(
@@ -741,21 +846,21 @@ DO NOT include markdown formatting, code blocks, or any text outside the JSON st
         return enriched_count
     
     def _build_headline_from_connection(self, keyword: str, conn: CountryMusicConnection) -> str:
-        """Build a headline directly from network graph connection data."""
+        """Build a headline directly from tier-based connection data."""
         entity = conn.connection_entity
         conn_type = conn.connection_type.replace('_', ' ').title()
         
-        if conn.degree == 1:
-            # Direct connection - make it punchy
-            return f"{keyword} + {entity}: {conn_type}"
+        if conn.relevance_tier == 1:
+            # Direct country music - make it punchy
+            return f"{keyword}: {entity}"
             
-        elif conn.degree == 2:
-            # 2-degree connection
+        elif conn.relevance_tier == 2:
+            # Related topic
             return f"{keyword} to Country Music via {entity}"
             
         else:
-            # 3-degree connection
-            return f"The {keyword}-{entity} Country Music Connection"
+            # Tier 3 (shouldn't reach here)
+            return f"{keyword} - {entity}"
     
     async def get_story_intelligence_dashboard(
         self,
@@ -794,6 +899,13 @@ DO NOT include markdown formatting, code blocks, or any text outside the JSON st
         )
         angles = angles_result.scalars().all()
         
+        # Calculate tier breakdown
+        tier_breakdown = {
+            "tier1": len([row for row in keyword_rows if row.TrendKeyword.relevance_tier == 1]),
+            "tier2": len([row for row in keyword_rows if row.TrendKeyword.relevance_tier == 2]),
+            "tier3": len([row for row in keyword_rows if row.TrendKeyword.relevance_tier == 3])
+        }
+        
         return {
             "trending_keywords": [
                 {
@@ -801,10 +913,15 @@ DO NOT include markdown formatting, code blocks, or any text outside the JSON st
                     "keyword": row.TrendKeyword.keyword,
                     "search_volume": row.TrendKeyword.search_volume,
                     "trend_rank": row.TrendKeyword.trend_rank,
-                    "connection_count": row.connection_count
+                    "connection_count": row.connection_count,
+                    "relevance_tier": row.TrendKeyword.relevance_tier,
+                    "relevance_score": row.TrendKeyword.relevance_score,
+                    "classification_reason": row.TrendKeyword.classification_reason,
+                    "country_music_connection": row.TrendKeyword.country_music_connection
                 }
                 for row in keyword_rows
             ],
+            "tier_breakdown": tier_breakdown,
             "story_angles": [
                 {
                     "id": a.id,

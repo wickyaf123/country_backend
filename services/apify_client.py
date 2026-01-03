@@ -22,6 +22,51 @@ from config import settings
 logger = structlog.get_logger()
 
 
+def parse_search_volume(volume_str) -> int:
+    """
+    Parse Google Trends search volume strings into numeric values.
+    
+    Examples:
+        "20K+" -> 20000
+        "2M+" -> 2000000
+        "500+" -> 500
+        "5.2K+" -> 5200
+    
+    Args:
+        volume_str: Volume string from Google Trends (can be string or number)
+    
+    Returns:
+        Integer representation of the search volume
+    """
+    if not volume_str:
+        return 0
+    
+    # If already a number, return it
+    if isinstance(volume_str, (int, float)):
+        return int(volume_str)
+    
+    # Remove '+' and whitespace
+    volume_str = str(volume_str).replace('+', '').strip().upper()
+    
+    if not volume_str:
+        return 0
+    
+    try:
+        # Handle K (thousands)
+        if 'K' in volume_str:
+            return int(float(volume_str.replace('K', '')) * 1000)
+        
+        # Handle M (millions)
+        if 'M' in volume_str:
+            return int(float(volume_str.replace('M', '')) * 1000000)
+        
+        # Plain number
+        return int(float(volume_str))
+    except (ValueError, AttributeError):
+        logger.warning(f"Could not parse search volume: {volume_str}")
+        return 0
+
+
 @dataclass
 class ApifyRunResult:
     """Result from an Apify actor run."""
@@ -53,6 +98,9 @@ class ApifyClientError(Exception):
 class ApifyClient:
     """Client for interacting with Apify REST API."""
     
+    # New fast scraper actor ID
+    GOOGLE_TRENDS_FAST_SCRAPER = "data_xplorer/google-trends-fast-scraper"
+    
     def __init__(self, api_key: Optional[str] = None):
         """Initialize Apify client."""
         self.api_key = api_key or settings.apify_api_key
@@ -81,74 +129,72 @@ class ApifyClient:
         """Async context manager exit."""
         await self.client.aclose()
     
-    async def run_google_trends_advanced(
+    async def run_google_trends_fast_trending(
         self,
-        scrape_type: str = "interest_over_time",
-        keywords: List[str] = None,
-        geo: str = "US",
-        timeframe: str = "today 12-m",
-        geo_resolution: str = "COUNTRY",
-        inc_low_vol: bool = False,
-        trending_hours: int = 24,
-        trending_language: str = "en"
+        country: str = "US",
+        timeframe_hours: int = 24,
+        use_proxy: bool = True
     ) -> ApifyRunResult:
         """
-        Run the advanced Google Trends actor with multiple scrape types.
+        Run the fast Google Trends scraper for trending searches.
         
-        Based on: https://apify.com/qp6mKSScYoutYqCOa/google-trends-scraper
+        Based on: https://apify.com/data_xplorer/google-trends-fast-scraper
         
         Args:
-            scrape_type: Type of scrape (trending_now, interest_over_time, related_queries, interest_by_region)
-            keywords: List of keywords to search for
-            geo: Geographic region (e.g., 'US', 'GB')
-            timeframe: Time range for trends (e.g., 'today 12-m')
-            geo_resolution: Geographic resolution (COUNTRY, REGION, DMA, CITY)
-            inc_low_vol: Include low-volume regions
-            trending_hours: Hours for trending searches (1-191)
-            trending_language: Language for trending searches
+            country: Country code (e.g., 'US', 'GB', 'FR')
+            timeframe_hours: Time period (4, 24, 48, or 168 hours)
+            use_proxy: Whether to use Apify residential proxies
+        
+        Returns:
+            ApifyRunResult with trending searches data
         """
         logger.info(
-            "Starting advanced Google Trends actor run",
-            scrape_type=scrape_type,
-            keywords=keywords,
-            geo=geo
+            "Starting fast Google Trends trending searches",
+            country=country,
+            timeframe_hours=timeframe_hours
         )
         
-        # Prepare actor input for the new actor
+        # Validate timeframe
+        valid_timeframes = [4, 24, 48, 168]
+        if timeframe_hours not in valid_timeframes:
+            logger.warning(
+                f"Invalid timeframe {timeframe_hours}h, defaulting to 24h",
+                valid_timeframes=valid_timeframes
+            )
+            timeframe_hours = 24
+        
+        # Prepare actor input
         run_input = {
-            "scrape_type": scrape_type,
-            "keywords": keywords or [],
-            "gprop": "web",
-            "timeframe_type": "predefined",
-            "predefined_timeframe": timeframe,
-            "custom_timeframe": "",
-            "geo_selection_type": "Common Countries",
-            "common_geo": geo,
-            "custom_geo_code": "",
-            "geo_resolution": geo_resolution,
-            "inc_low_vol": inc_low_vol,
-            "trending_language": trending_language,
-            "trending_hours": trending_hours,
-            "proxyConfiguration": {}
+            "enableTrendingSearches": True,
+            "trendingSearchesCountry": country,
+            "trendingSearchesTimeframe": str(timeframe_hours),
+            "proxyConfiguration": {
+                "useApifyProxy": use_proxy
+            }
         }
         
+        if use_proxy:
+            run_input["proxyConfiguration"]["apifyProxyGroups"] = ["RESIDENTIAL"]
+        
         try:
-            # Use the new actor ID
-            new_actor_id = "qp6mKSScYoutYqCOa"
-            
+            # URL encode the actor ID (replace / with ~)
+            actor_id_encoded = self.GOOGLE_TRENDS_FAST_SCRAPER.replace("/", "~")
             response = await self._make_request(
                 "POST",
-                f"/acts/{new_actor_id}/runs",
+                f"/acts/{actor_id_encoded}/runs",
                 json=run_input
             )
             
             run_data = response.json()["data"]
             run_id = run_data["id"]
             
-            logger.info("Advanced actor run started", run_id=run_id, scrape_type=scrape_type)
+            logger.info("Fast trending scraper run started", run_id=run_id)
             
             # Wait for completion
-            result = await self._wait_for_completion(run_id, actor_id=new_actor_id)
+            result = await self._wait_for_completion(
+                run_id, 
+                actor_id=actor_id_encoded
+            )
             
             # Fetch results
             dataset_items = await self._fetch_dataset_items(result["defaultDatasetId"])
@@ -162,15 +208,154 @@ class ApifyClient:
             )
             
         except Exception as e:
-            logger.error("Failed to run advanced Google Trends actor", error=str(e))
+            logger.error("Failed to run fast trending scraper", error=str(e))
             raise ApifyClientError(f"Actor run failed: {str(e)}")
+    
+    async def run_google_trends_fast_keywords(
+        self,
+        keywords: List[str],
+        timeframe: str = "today 12-m",
+        geo: str = "US",
+        fetch_regional_data: bool = False,
+        use_proxy: bool = True
+    ) -> List[ApifyRunResult]:
+        """
+        Run the fast Google Trends scraper for keyword analysis.
+        Note: This scraper processes one keyword at a time.
+        
+        Args:
+            keywords: List of keywords to analyze
+            timeframe: Time period (e.g., 'today 12-m', 'today 3-m', 'now 7-d')
+            geo: Country code (e.g., 'US', 'GB') or empty string for worldwide
+            fetch_regional_data: Whether to fetch regional interest data
+            use_proxy: Whether to use Apify residential proxies
+        
+        Returns:
+            List of ApifyRunResult, one per keyword
+        """
+        logger.info(
+            "Starting fast Google Trends keyword analysis",
+            keywords=keywords,
+            timeframe=timeframe,
+            geo=geo
+        )
+        
+        results = []
+        
+        for keyword in keywords:
+            try:
+                # Prepare actor input for single keyword
+                run_input = {
+                    "enableTrendingSearches": False,
+                    "keyword": keyword,
+                    "predefinedTimeframe": timeframe,
+                    "geo": geo,
+                    "fetchRegionalData": fetch_regional_data,
+                    "proxyConfiguration": {
+                        "useApifyProxy": use_proxy
+                    }
+                }
+                
+                if use_proxy:
+                    run_input["proxyConfiguration"]["apifyProxyGroups"] = ["RESIDENTIAL"]
+                
+                # URL encode the actor ID (replace / with ~)
+                actor_id_encoded = self.GOOGLE_TRENDS_FAST_SCRAPER.replace("/", "~")
+                response = await self._make_request(
+                    "POST",
+                    f"/acts/{actor_id_encoded}/runs",
+                    json=run_input
+                )
+                
+                run_data = response.json()["data"]
+                run_id = run_data["id"]
+                
+                logger.info("Fast keyword scraper run started", run_id=run_id, keyword=keyword)
+                
+                # Wait for completion
+                result = await self._wait_for_completion(
+                    run_id, 
+                    actor_id=actor_id_encoded
+                )
+                
+                # Fetch results
+                dataset_items = await self._fetch_dataset_items(result["defaultDatasetId"])
+                
+                results.append(ApifyRunResult(
+                    run_id=run_id,
+                    status=result["status"],
+                    data=dataset_items,
+                    started_at=datetime.fromisoformat(result["startedAt"].replace("Z", "+00:00")),
+                    finished_at=datetime.fromisoformat(result["finishedAt"].replace("Z", "+00:00")) if result.get("finishedAt") else None
+                ))
+                
+            except Exception as e:
+                logger.error("Failed to analyze keyword", keyword=keyword, error=str(e))
+                # Continue with other keywords
+                continue
+        
+        logger.info(f"Completed keyword analysis for {len(results)}/{len(keywords)} keywords")
+        return results
+    
+    async def run_google_trends_advanced(
+        self,
+        scrape_type: str = "interest_over_time",
+        keywords: List[str] = None,
+        geo: str = "US",
+        timeframe: str = "today 12-m",
+        geo_resolution: str = "COUNTRY",
+        inc_low_vol: bool = False,
+        trending_hours: int = 24,
+        trending_language: str = "en"
+    ) -> ApifyRunResult:
+        """
+        DEPRECATED: Use run_google_trends_fast_trending or run_google_trends_fast_keywords instead.
+        
+        This method is kept for backward compatibility and now redirects to the new fast scraper.
+        """
+        logger.warning(
+            "run_google_trends_advanced is deprecated, using new fast scraper",
+            scrape_type=scrape_type
+        )
+        
+        # Map to new fast scraper based on scrape_type
+        if scrape_type == "trending_now":
+            # Map trending_hours to valid timeframe
+            timeframe_hours = 24
+            if trending_hours <= 4:
+                timeframe_hours = 4
+            elif trending_hours <= 24:
+                timeframe_hours = 24
+            elif trending_hours <= 48:
+                timeframe_hours = 48
+            else:
+                timeframe_hours = 168
+            
+            return await self.run_google_trends_fast_trending(
+                country=geo,
+                timeframe_hours=timeframe_hours,
+                use_proxy=True
+            )
+        else:
+            # For keyword-based scrapes, run for first keyword only
+            if keywords and len(keywords) > 0:
+                results = await self.run_google_trends_fast_keywords(
+                    keywords=[keywords[0]],
+                    timeframe=timeframe,
+                    geo=geo,
+                    fetch_regional_data=(scrape_type == "interest_by_region"),
+                    use_proxy=True
+                )
+                return results[0] if results else None
+            else:
+                raise ApifyClientError("Keywords required for non-trending scrape types")
     
     async def _wait_for_completion(self, run_id: str, poll_interval: int = 10, actor_id: str = None) -> Dict[str, Any]:
         """Wait for actor run to complete."""
         logger.info("Waiting for actor run completion", run_id=run_id)
         
         actor_id = actor_id or self.actor_id
-        max_wait_time = 900  # 15 minutes (actor takes 6-8 minutes typically)
+        max_wait_time = 600  # 10 minutes (new scraper is faster)
         elapsed_time = 0
         
         while elapsed_time < max_wait_time:
@@ -313,7 +498,16 @@ class ApifyClient:
                     # Process trending searches
                     for trend_item in data:
                         keyword = trend_item.get("keyword", "")
-                        search_volume = trend_item.get("approx_traffic", 0)
+                        # Parse search volume from string format (e.g., "20K+", "2M+")
+                        raw_volume = trend_item.get("approx_traffic", 0)
+                        search_volume = parse_search_volume(raw_volume)
+                        
+                        logger.debug(
+                            "Parsed search volume",
+                            keyword=keyword,
+                            raw_volume=raw_volume,
+                            parsed_volume=search_volume
+                        )
                         
                         trends_data.append(GoogleTrendsData(
                             keyword=keyword,
@@ -393,5 +587,79 @@ class ApifyClient:
                 continue
         
         logger.info(f"Transformed {len(trends_data)} trend items from advanced actor")
+        return trends_data
+    
+    def transform_fast_trending_data(
+        self,
+        apify_result: ApifyRunResult
+    ) -> List[GoogleTrendsData]:
+        """
+        Transform data from the new fast trending scraper.
+        
+        Expected format:
+        {
+            "geo": "US",
+            "language": "en-US",
+            "timeframe_hours": 24,
+            "trending_searches": [
+                {
+                    "rank": 1,
+                    "term": "keyword",
+                    "trend_volume": "500k+",
+                    "trend_volume_formatted": 500000,
+                    "related_terms": ["term1", "term2"]
+                }
+            ]
+        }
+        """
+        trends_data = []
+        
+        for item in apify_result.data:
+            try:
+                geo = item.get("geo", "US")
+                timeframe_hours = item.get("timeframe_hours", 24)
+                trending_searches = item.get("trending_searches", [])
+                
+                logger.info(
+                    f"Processing {len(trending_searches)} trending searches",
+                    geo=geo,
+                    timeframe_hours=timeframe_hours
+                )
+                
+                for trend in trending_searches:
+                    keyword = trend.get("term", "")
+                    
+                    # Use formatted volume if available, otherwise parse string
+                    if "trend_volume_formatted" in trend:
+                        search_volume = trend["trend_volume_formatted"]
+                    else:
+                        raw_volume = trend.get("trend_volume", "0")
+                        search_volume = parse_search_volume(raw_volume)
+                    
+                    related_terms = trend.get("related_terms", [])
+                    
+                    logger.debug(
+                        "Parsed trending search",
+                        keyword=keyword,
+                        search_volume=search_volume,
+                        rank=trend.get("rank")
+                    )
+                    
+                    trends_data.append(GoogleTrendsData(
+                        keyword=keyword,
+                        search_volume=search_volume,
+                        change_percent=None,
+                        geo_region=geo,
+                        related_queries=related_terms,
+                        time_range=f"{timeframe_hours}h",
+                        recorded_at=datetime.now(timezone.utc),
+                        apify_run_id=apify_result.run_id
+                    ))
+                
+            except Exception as e:
+                logger.error("Failed to transform trending item", item=item, error=str(e))
+                continue
+        
+        logger.info(f"Transformed {len(trends_data)} trending searches")
         return trends_data
     

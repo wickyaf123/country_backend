@@ -171,10 +171,13 @@ class RSSRealtimeService:
                 break
         
         if matched_keywords or direct_country_match:
+            # Tier 1 if direct country match, Tier 2 if keyword match
+            tier = 1 if direct_country_match else 2
             return {
                 "is_relevant": True,
                 "keywords": matched_keywords,
                 "relevance_score": 1.0 if direct_country_match else 0.8,
+                "relevance_tier": tier,
                 "matched_keyword_id": matched_keyword_id
             }
         
@@ -234,10 +237,20 @@ Return ONLY a RAW JSON object (no markdown) with this structure:
                             final_matched_id = kw_id
                             break
                     
+                    # Determine tier from relevance score
+                    relevance_score = response.get("relevance_score", 0.0)
+                    if relevance_score >= 0.9:
+                        tier = 1
+                    elif relevance_score >= 0.5:
+                        tier = 2
+                    else:
+                        tier = 3
+                    
                     return {
                         "is_relevant": response.get("is_relevant", False),
                         "keywords": extracted_kws,
-                        "relevance_score": response.get("relevance_score", 0.0),
+                        "relevance_score": relevance_score,
+                        "relevance_tier": tier,
                         "matched_keyword_id": final_matched_id
                     }
                 except Exception as e:
@@ -247,6 +260,7 @@ Return ONLY a RAW JSON object (no markdown) with this structure:
             "is_relevant": False,
             "keywords": [],
             "relevance_score": 0.0,
+            "relevance_tier": 3,
             "matched_keyword_id": None
         }
 

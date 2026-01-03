@@ -8,7 +8,7 @@ from sqlalchemy import select, desc, func
 import structlog
 import uuid
 
-from database import get_db
+from database import get_db, AsyncSessionLocal
 from models.story_intelligence import (
     TrendKeyword, CountryMusicConnection, StoryAngle, RSSStoryLead, PipelineRun
 )
@@ -37,6 +37,7 @@ router = APIRouter(prefix="/api/v1/story-intelligence", tags=["Story Intelligenc
 async def trigger_story_intelligence_pipeline(
     background_tasks: BackgroundTasks,
     keyword_limit: int = Query(default=50, ge=10, le=100, description="Number of keywords to process"),
+    trending_hours: int = Query(default=24, ge=1, le=168, description="Time window in hours (1-168)"),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -44,6 +45,7 @@ async def trigger_story_intelligence_pipeline(
     
     Args:
         keyword_limit: Number of keywords to process (10-100). Default: 50
+        trending_hours: Time window in hours (1-168). Default: 24
     """
     run_id = str(uuid.uuid4())
     start_time = datetime.now(timezone.utc)
@@ -62,17 +64,20 @@ async def trigger_story_intelligence_pipeline(
         db.add(run)
         await db.commit()
         
-        # Run in background
+        # Run in background with its own database session
+        # IMPORTANT: Cannot use the request's db session as it's closed after response
         async def run_pipeline():
             try:
-                # Pass keyword_limit to the service
-                await story_intelligence_service.run_hourly_intelligence_cycle(
-                    db, 
-                    run_id=run_id, 
-                    keyword_limit=keyword_limit
-                )
+                # Create a new database session for the background task
+                async with AsyncSessionLocal() as bg_db:
+                    await story_intelligence_service.run_hourly_intelligence_cycle(
+                        bg_db, 
+                        run_id=run_id, 
+                        keyword_limit=keyword_limit,
+                        trending_hours=trending_hours
+                    )
             except Exception as e:
-                logger.error("Background pipeline failed", run_id=run_id, error=str(e))
+                logger.error("Background pipeline failed", run_id=run_id, error=str(e), exc_info=True)
         
         background_tasks.add_task(run_pipeline)
         
@@ -84,7 +89,7 @@ async def trigger_story_intelligence_pipeline(
         return PipelineTriggerResponse(
             status="started",
             run_id=run_id,
-            message=f"Story Intelligence pipeline started for {keyword_limit} keywords",
+            message=f"Story Intelligence pipeline started for {keyword_limit} keywords (past {trending_hours}h)",
             started_at=start_time.isoformat(),
             estimated_completion=estimated_time,
             check_status_url=f"/api/v1/story-intelligence/status/{run_id}"
@@ -180,7 +185,7 @@ async def get_keyword_connections(
         query = query.order_by(desc(CountryMusicConnection.discovered_at))
     else:
         query = query.order_by(
-            CountryMusicConnection.degree,
+            CountryMusicConnection.relevance_tier,
             desc(CountryMusicConnection.confidence_score)
         )
         
@@ -193,7 +198,7 @@ async def get_keyword_connections(
     # Group by degree
     grouped = {1: [], 2: [], 3: []}
     for conn in connections:
-        grouped[conn.degree].append({
+        grouped[conn.relevance_tier].append({
             "id": conn.id,
             "type": conn.connection_type,
             "entity": conn.connection_entity,
@@ -291,13 +296,13 @@ async def get_story_angles(
         conn_result = await db.execute(
             select(CountryMusicConnection)
             .where(CountryMusicConnection.keyword_id == keyword.id)
-            .order_by(CountryMusicConnection.degree, desc(CountryMusicConnection.confidence_score))
+            .order_by(CountryMusicConnection.relevance_tier, desc(CountryMusicConnection.confidence_score))
             .limit(1)
         )
         conn = conn_result.scalar_one_or_none()
         
         # Apply connection filters (post-query filtering)
-        if connection_degree is not None and (not conn or conn.degree != connection_degree):
+        if connection_degree is not None and (not conn or conn.relevance_tier != connection_degree):
             continue
         if connection_type is not None and (not conn or conn.connection_type != connection_type):
             continue
@@ -332,14 +337,14 @@ async def get_story_angles(
         conn_type = None
         
         if conn:
-            degree = conn.degree
+            degree = conn.relevance_tier
             conn_type = conn.connection_type
-            if conn.degree == 1:
+            if conn.relevance_tier == 1:
                 path = f"{keyword.keyword} → {conn.connection_entity}"
-            elif conn.degree == 2:
+            elif conn.relevance_tier == 2:
                 path = f"{keyword.keyword} → {conn.connection_entity} → Country Music"
-            else:  # degree 3
-                path = f"{keyword.keyword} → [Cultural/Lifestyle] → {conn.connection_entity} → Country Music"
+            else:  # tier 3
+                path = f"{keyword.keyword} → {conn.connection_entity} (No Connection)"
             explanation = conn.connection_description
         
         # Build response with RSS data
@@ -355,7 +360,7 @@ async def get_story_angles(
             "suggested_sources": angle.suggested_sources,
             "deep_research_results": angle.deep_research_results,
             "connection_path": path,
-            "connection_degree": degree,
+            "relevance_tier": degree,
             "connection_type": conn_type,
             "connection_explanation": explanation,
             "created_at": angle.created_at.isoformat(),
@@ -497,13 +502,13 @@ async def get_connection_graph(
             id=node_id,
             label=conn.connection_entity,
             type=conn.connection_type,
-            degree=conn.degree
+            degree=conn.relevance_tier
         ))
         
         edges.append(ConnectionGraphEdge(
             source=keyword.id,
             target=node_id,
-            label=f"{conn.degree}° - {conn.connection_type}",
+            label=f"T{conn.relevance_tier} - {conn.connection_type}",
             confidence=conn.confidence_score
         ))
     
@@ -638,7 +643,7 @@ async def get_network_graph_data(
                     "id": entity_id,
                     "label": conn.connection_entity,
                     "type": conn.connection_type,
-                    "degree": conn.degree,
+                    "relevance_tier": conn.relevance_tier,
                     "connection_chain": conn.connection_chain,
                     "confidence": conn.confidence_score,
                     "description": conn.connection_description[:100] + "..." if conn.connection_description and len(conn.connection_description) > 100 else conn.connection_description
@@ -650,9 +655,9 @@ async def get_network_graph_data(
                     "id": f"edge_{conn.id}",
                     "source": f"keyword_{keyword.id}",
                     "target": entity_id,
-                    "degree": conn.degree,
+                    "relevance_tier": conn.relevance_tier,
                     "confidence": conn.confidence_score,
-                    "label": conn.connection_chain if conn.connection_chain else f"{conn.degree}° - {conn.connection_type}",
+                    "label": conn.connection_chain if conn.connection_chain else f"T{conn.relevance_tier} - {conn.connection_type}",
                     "chain": conn.connection_chain
                 }
             })

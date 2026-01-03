@@ -26,6 +26,12 @@ class TrendKeyword(Base):
     parsing_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, default="success")
     # Values: "success", "repaired", "partial", "failed"
     
+    # Tier classification fields
+    relevance_tier: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    relevance_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    classification_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    country_music_connection: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    
     # Relationships
     connections: Mapped[list["CountryMusicConnection"]] = relationship(
         "CountryMusicConnection",
@@ -43,7 +49,7 @@ class TrendKeyword(Base):
 
 
 class CountryMusicConnection(Base):
-    """Multi-degree connections from keywords to country music."""
+    """Multi-tier connections from keywords to country music."""
     
     __tablename__ = "country_music_connections"
     
@@ -51,7 +57,7 @@ class CountryMusicConnection(Base):
     keyword_id: Mapped[str] = mapped_column(String(36), ForeignKey("trend_keywords.id"), nullable=False)
     
     # Connection details
-    degree: Mapped[int] = mapped_column(Integer, nullable=False)  # 1, 2, or 3
+    relevance_tier: Mapped[int] = mapped_column(Integer, nullable=False)  # 1, 2, or 3
     connection_type: Mapped[str] = mapped_column(String(100), nullable=False)
     connection_entity: Mapped[str] = mapped_column(String(500), nullable=False)
     connection_description: Mapped[str] = mapped_column(Text, nullable=False)
@@ -68,7 +74,7 @@ class CountryMusicConnection(Base):
     keyword: Mapped["TrendKeyword"] = relationship("TrendKeyword", back_populates="connections")
     
     def __repr__(self) -> str:
-        return f"<CountryMusicConnection(id={self.id}, degree={self.degree}, entity='{self.connection_entity}')>"
+        return f"<CountryMusicConnection(id={self.id}, tier={self.relevance_tier}, entity='{self.connection_entity}')>"
 
 
 class StoryAngle(Base):
