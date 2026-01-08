@@ -108,6 +108,12 @@ class RSSRealtimeService:
                 else:
                     pub_date = datetime.now(timezone.utc)
                 
+                # Only include articles from last 30 days (match 12-month connection recency)
+                from datetime import timedelta
+                cutoff_date = datetime.now(timezone.utc) - timedelta(days=30)
+                if pub_date < cutoff_date:
+                    continue  # Skip old articles
+                
                 # Extract keywords and check relevance
                 analysis = await self._analyze_rss_entry(
                     title, trending_keywords, keyword_id_map

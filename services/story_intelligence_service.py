@@ -10,7 +10,6 @@ from sqlalchemy import select, desc, func, delete
 from config import settings
 from models.story_intelligence import TrendKeyword, CountryMusicConnection, StoryAngle, PipelineRun, RSSStoryLead
 from services.apify_client import ApifyClient
-from services.openai_service import OpenAIService
 
 logger = structlog.get_logger()
 
@@ -23,14 +22,12 @@ class StoryIntelligenceService:
     3. Generate story angles
     """
     
-    def __init__(self):
-        self.openai_service = OpenAIService()
-    
     async def run_hourly_intelligence_cycle(
         self, 
         db: AsyncSession, 
         run_id: Optional[str] = None,
-        keyword_limit: int = 50
+        timeframe: str = "24",
+        keyword_limit: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Main hourly cycle that runs the entire intelligence pipeline.
@@ -38,9 +35,10 @@ class StoryIntelligenceService:
         Args:
             db: Database session
             run_id: Optional pipeline run ID for tracking
-            keyword_limit: Number of keywords to process (default: 50)
+            timeframe: Timeframe for trending searches ("4", "24", "48", "168")
+            keyword_limit: Optional limit on number of keywords to process (for testing)
         """
-        logger.info("Starting Story Intelligence hourly cycle", run_id=run_id, keyword_limit=keyword_limit)
+        logger.info("Starting Story Intelligence hourly cycle", run_id=run_id, timeframe=timeframe, keyword_limit=keyword_limit)
         
         try:
             # Step 0: Clear ALL previous data for completely fresh start
@@ -50,12 +48,19 @@ class StoryIntelligenceService:
             cleanup_count = await self._clear_all_data(db)
             logger.info(f"Cleared {cleanup_count} previous keywords - starting with fresh data")
             
-            # Step 1: Fetch only the trending keywords we need
+            # Step 1: Fetch trending keywords for the selected timeframe
             if run_id:
-                await self._update_pipeline_run(db, run_id, "fetching_trends", f"Fetching top {keyword_limit} Google Trends")
+                limit_msg = f" (limited to {keyword_limit})" if keyword_limit else ""
+                await self._update_pipeline_run(db, run_id, "fetching_trends", f"Fetching trending keywords for {timeframe}h timeframe{limit_msg}")
             
-            trends = await self.fetch_trending_keywords(limit=keyword_limit)
-            logger.info(f"Fetched {len(trends)} trending keywords")
+            trends = await self.fetch_trending_keywords(timeframe=timeframe)
+            
+            # Apply keyword limit if specified (for testing)
+            if keyword_limit and keyword_limit > 0:
+                trends = trends[:keyword_limit]
+                logger.info(f"Limited to {len(trends)} trending keywords for testing")
+            else:
+                logger.info(f"Fetched {len(trends)} trending keywords for {timeframe}h timeframe")
             
             # Step 2: Save all fetched keywords to database
             keyword_records = await self.save_trend_keywords(db, trends)
@@ -447,31 +452,34 @@ DO NOT include markdown formatting, code blocks, or any text outside the JSON st
             logger.error("Deep research failed", angle_id=angle_id, error=str(e))
             raise
 
-    async def fetch_trending_keywords(self, limit: int = 100) -> List[Dict[str, Any]]:
+    async def fetch_trending_keywords(self, timeframe: str = "24") -> List[Dict[str, Any]]:
         """
-        Fetch top N trending keywords from Google Trends using Apify.
+        Fetch ALL trending keywords from Google Trends using Apify FAST actor.
         
         Args:
-            limit: Number of trending keywords to fetch (default: 100)
+            timeframe: Timeframe in hours ("4", "24", "48", "168")
+        
+        Returns:
+            List of ALL trending keywords for the timeframe (no limit)
         """
         async with ApifyClient() as client:
-            # Trending Now - gets real-time trends
-            result = await client.run_google_trends_advanced(
-                scrape_type="trending_now",
-                geo="US",
-                trending_hours=24,
-                trending_language="en"
+            # Use new FAST actor with trending searches
+            result = await client.run_trending_searches(
+                timeframe=timeframe,
+                country="US"
             )
             
-            # Transform and sort by search volume
-            trends_data = client.transform_advanced_trends_data(result)
+            # Transform using the new method
+            trends_data = client.transform_trending_searches_data(result)
             
-            # Sort by search volume and take top N (based on limit)
+            # Sort by search volume (already ALL trends, no limiting)
             sorted_trends = sorted(
                 trends_data,
                 key=lambda x: x.search_volume,
                 reverse=True
-            )[:limit]
+            )
+            
+            logger.info(f"Fetched {len(sorted_trends)} trending keywords for {timeframe}h timeframe")
             
             return [
                 {
@@ -517,18 +525,24 @@ DO NOT include markdown formatting, code blocks, or any text outside the JSON st
         keywords: List[TrendKeyword]
     ) -> List[CountryMusicConnection]:
         """
-        Analyze connections to country music for all keywords.
-        Process in batches to avoid rate limits.
+        Analyze connections with REASONING-PRO + GPT-4 and RECENCY FILTER.
+        Process in batches for optimal performance and rate limit compliance.
         """
         from services.connection_analyzer_service import connection_analyzer_service
         
         connections = []
-        batch_size = 50  # Increased batch size for high parallelism (requested 50 keywords)
+        # BATCH SIZE: 5 for optimal performance (3 reasoning-pro + 1 GPT-4 per keyword)
+        # Reasoning-pro limit: 50 RPM, so 5 keywords in parallel = safe
+        batch_size = 5
         
         for i in range(0, len(keywords), batch_size):
             batch = keywords[i:i+batch_size]
             
-            logger.info(f"Processing batch {i//batch_size + 1}/{(len(keywords) + batch_size - 1)//batch_size}")
+            logger.info(
+                f"Processing batch {i//batch_size + 1}/{(len(keywords) + batch_size - 1)//batch_size}",
+                batch_size=len(batch),
+                strategy="Reasoning-Pro + GPT-4"
+            )
             
             # Process batch in parallel
             tasks = [
@@ -546,7 +560,9 @@ DO NOT include markdown formatting, code blocks, or any text outside the JSON st
                     logger.error(
                         "Connection analysis failed",
                         keyword=keyword.keyword,
-                        error=str(result)
+                        error=str(result),
+                        error_type=type(result).__name__,
+                        exc_info=result
                     )
                     # Set parsing status to failed
                     keyword.parsing_status = "failed"
@@ -586,9 +602,10 @@ DO NOT include markdown formatting, code blocks, or any text outside the JSON st
             
             await db.commit()
             
-            # Brief pause between batches
+            # Pause between batches for rate limiting
             if i + batch_size < len(keywords):
-                await asyncio.sleep(2)
+                logger.info("Pausing 3s between batches")
+                await asyncio.sleep(3)
         
         return connections
     

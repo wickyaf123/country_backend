@@ -17,7 +17,7 @@ logger = structlog.get_logger()
 async def run_story_intelligence_cycle():
     """
     Hourly job that runs the complete Story Intelligence pipeline:
-    1. Fetch trending keywords (configurable limit, default 50)
+    1. Fetch trending keywords (timeframe-based, default 24h)
     2. Analyze connections to country music
     3. Generate story angles
     4. Scrape RSS feeds for matching stories
@@ -26,10 +26,10 @@ async def run_story_intelligence_cycle():
     
     async with AsyncSessionLocal() as db:
         try:
-            # Run main intelligence pipeline with 50 keywords by default
+            # Run main intelligence pipeline with 24h timeframe by default
             result = await story_intelligence_service.run_hourly_intelligence_cycle(
                 db, 
-                keyword_limit=50
+                timeframe="24"
             )
             
             logger.info(

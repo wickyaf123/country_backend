@@ -36,19 +36,29 @@ router = APIRouter(prefix="/api/v1/story-intelligence", tags=["Story Intelligenc
 @router.post("/manual-trigger", response_model=PipelineTriggerResponse)
 async def trigger_story_intelligence_pipeline(
     background_tasks: BackgroundTasks,
-    keyword_limit: int = Query(default=50, ge=10, le=100, description="Number of keywords to process"),
+    timeframe: str = Query(
+        default="24",
+        description="Timeframe for trending searches: 4, 24, 48, or 168 hours",
+        regex="^(4|24|48|168)$"
+    ),
+    keyword_limit: Optional[int] = Query(
+        default=None,
+        description="Optional limit on number of keywords to process (for testing)",
+        ge=1
+    ),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Manually trigger the complete Story Intelligence pipeline.
     
     Args:
-        keyword_limit: Number of keywords to process (10-100). Default: 50
+        timeframe: Timeframe for trending searches (4h, 24h, 48h, 168h/7d)
+        keyword_limit: Optional limit on keywords (useful for testing with 1 keyword)
     """
     run_id = str(uuid.uuid4())
     start_time = datetime.now(timezone.utc)
     
-    logger.info("Manual pipeline trigger initiated", run_id=run_id, keyword_limit=keyword_limit)
+    logger.info("Manual pipeline trigger initiated", run_id=run_id, timeframe=timeframe)
     
     try:
         # Create pipeline run record
@@ -62,29 +72,39 @@ async def trigger_story_intelligence_pipeline(
         db.add(run)
         await db.commit()
         
-        # Run in background
+        # Run in background with NEW database session (the current `db` will be closed after this request returns)
         async def run_pipeline():
             try:
-                # Pass keyword_limit to the service
-                await story_intelligence_service.run_hourly_intelligence_cycle(
-                    db, 
-                    run_id=run_id, 
-                    keyword_limit=keyword_limit
-                )
-            except Exception as e:
-                logger.error("Background pipeline failed", run_id=run_id, error=str(e))
+                from database import AsyncSessionLocal
+                async with AsyncSessionLocal() as new_db:
+                    try:
+                        # Pass timeframe and keyword_limit to the service
+                        await story_intelligence_service.run_hourly_intelligence_cycle(
+                            new_db, 
+                            run_id=run_id, 
+                            timeframe=timeframe,
+                            keyword_limit=keyword_limit
+                        )
+                    except Exception as e:
+                        logger.error("Background pipeline failed", run_id=run_id, error=str(e), exc_info=True)
+            except Exception as outer_e:
+                logger.error("Fatal error in background pipeline", run_id=run_id, error=str(outer_e), exc_info=True)
         
         background_tasks.add_task(run_pipeline)
         
-        # Calculate estimated time (1 query per keyword, 50 RPM rate limit)
-        batch_count = (keyword_limit + 49) // 50  # Round up to batches of 50
-        estimated_minutes = batch_count + 1  # Each batch takes ~1 minute + buffer
-        estimated_time = f"{estimated_minutes}-{estimated_minutes + 1} minutes"
+        # Estimate time based on timeframe (more keywords = more processing time)
+        timeframe_estimates = {
+            "4": "2-3 minutes",
+            "24": "3-5 minutes",
+            "48": "4-6 minutes",
+            "168": "5-8 minutes"
+        }
+        estimated_time = timeframe_estimates.get(timeframe, "3-5 minutes")
         
         return PipelineTriggerResponse(
             status="started",
             run_id=run_id,
-            message=f"Story Intelligence pipeline started for {keyword_limit} keywords",
+            message=f"Story Intelligence pipeline started for {timeframe}h trending searches",
             started_at=start_time.isoformat(),
             estimated_completion=estimated_time,
             check_status_url=f"/api/v1/story-intelligence/status/{run_id}"
@@ -230,15 +250,17 @@ async def analyze_keyword_connections(
             deep_research=deep_research
         )
         
-        connections = await connection_analyzer_service.find_country_music_connections(
-            keyword=keyword,
-            deep_research=deep_research
+        # Note: deep_research parameter kept for API compatibility but not used
+        # Connection analyzer always uses sonar-reasoning-pro (fast and reliable)
+        connections, parsing_status = await connection_analyzer_service.find_country_music_connections(
+            keyword=keyword
         )
         
         return {
             "keyword": keyword,
             "deep_research_mode": deep_research,
-            "model_used": "sonar-deep-research" if deep_research else "sonar-reasoning-pro",
+            "model_used": "sonar-reasoning-pro",
+            "parsing_status": parsing_status,
             "connections": connections,
             "total_found": len(connections),
             "by_degree": {

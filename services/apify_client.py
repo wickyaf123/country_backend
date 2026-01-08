@@ -165,6 +165,61 @@ class ApifyClient:
             logger.error("Failed to run advanced Google Trends actor", error=str(e))
             raise ApifyClientError(f"Actor run failed: {str(e)}")
     
+    async def run_trending_searches(
+        self,
+        timeframe: str = "24",
+        country: str = "US"
+    ) -> ApifyRunResult:
+        """
+        Run trending searches using the FAST Google Trends actor.
+        
+        Args:
+            timeframe: Hours for trending searches ("4", "24", "48", "168")
+            country: Country code (e.g., "US")
+        
+        Returns:
+            ApifyRunResult with ALL trending keywords for the timeframe
+        """
+        logger.info(
+            "Starting trending searches with FAST actor",
+            timeframe=timeframe,
+            country=country
+        )
+        
+        run_input = {
+            "enableTrendingSearches": True,
+            "trendingSearchesCountry": country,
+            "trendingSearchesTimeframe": timeframe,
+            "proxyConfiguration": {"useApifyProxy": True}
+        }
+        
+        try:
+            response = await self._make_request(
+                "POST",
+                f"/acts/{self.actor_id}/runs",
+                json=run_input
+            )
+            
+            run_data = response.json()["data"]
+            run_id = run_data["id"]
+            
+            logger.info("Trending searches run started", run_id=run_id, timeframe=timeframe)
+            
+            result = await self._wait_for_completion(run_id, actor_id=self.actor_id)
+            dataset_items = await self._fetch_dataset_items(result["defaultDatasetId"])
+            
+            return ApifyRunResult(
+                run_id=run_id,
+                status=result["status"],
+                data=dataset_items,
+                started_at=datetime.fromisoformat(result["startedAt"].replace("Z", "+00:00")),
+                finished_at=datetime.fromisoformat(result["finishedAt"].replace("Z", "+00:00")) if result.get("finishedAt") else None
+            )
+            
+        except Exception as e:
+            logger.error("Failed to run trending searches", error=str(e))
+            raise ApifyClientError(f"Trending searches failed: {str(e)}")
+    
     async def _wait_for_completion(self, run_id: str, poll_interval: int = 10, actor_id: str = None) -> Dict[str, Any]:
         """Wait for actor run to complete."""
         logger.info("Waiting for actor run completion", run_id=run_id)
@@ -393,5 +448,45 @@ class ApifyClient:
                 continue
         
         logger.info(f"Transformed {len(trends_data)} trend items from advanced actor")
+        return trends_data
+    
+    def transform_trending_searches_data(
+        self,
+        apify_result: ApifyRunResult
+    ) -> List[GoogleTrendsData]:
+        """Transform FAST actor trending searches results."""
+        trends_data = []
+        
+        for item in apify_result.data:
+            try:
+                trending_searches = item.get("trending_searches", [])
+                geo = item.get("geo", "US")
+                timeframe_hours = item.get("timeframe_hours", 24)
+                
+                for trend_item in trending_searches:
+                    keyword = trend_item.get("term", "")
+                    
+                    # Parse volume (e.g., "500k+" -> 500000)
+                    volume_formatted = trend_item.get("trend_volume_formatted", 0)
+                    search_volume = volume_formatted if isinstance(volume_formatted, int) else 0
+                    
+                    related_terms = trend_item.get("related_terms", [])
+                    
+                    trends_data.append(GoogleTrendsData(
+                        keyword=keyword,
+                        search_volume=search_volume,
+                        change_percent=None,
+                        geo_region=geo,
+                        related_queries=related_terms,
+                        time_range=f"{timeframe_hours}h",
+                        recorded_at=datetime.now(timezone.utc),
+                        apify_run_id=apify_result.run_id
+                    ))
+            
+            except Exception as e:
+                logger.error("Failed to transform trending search item", item=item, error=str(e))
+                continue
+        
+        logger.info(f"Transformed {len(trends_data)} trending keywords from FAST actor")
         return trends_data
     

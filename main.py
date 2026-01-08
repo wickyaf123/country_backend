@@ -1,6 +1,7 @@
 """Main FastAPI application entry point."""
 
 import logging
+import sys
 from contextlib import asynccontextmanager
 
 import structlog
@@ -13,7 +14,14 @@ from database import create_tables, get_database
 from api import health, story_intelligence
 
 
-# Configure structured logging
+# Configure Python's standard logging to output to console
+logging.basicConfig(
+    format="%(message)s",
+    stream=sys.stdout,
+    level=logging.INFO,
+)
+
+# Configure structured logging with console renderer for better visibility
 structlog.configure(
     processors=[
         structlog.stdlib.filter_by_level,
@@ -24,7 +32,8 @@ structlog.configure(
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
         structlog.processors.UnicodeDecoder(),
-        structlog.processors.JSONRenderer()
+        # Use ConsoleRenderer for human-readable output (better for development)
+        structlog.dev.ConsoleRenderer()
     ],
     context_class=dict,
     logger_factory=structlog.stdlib.LoggerFactory(),

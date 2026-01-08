@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     
     perplexity_api_key: str | None = Field(default=None, description="Perplexity AI API key for connection analysis")
     apify_api_key: str | None = Field(default=None, description="Apify API key for Google Trends integration")
-    apify_actor_id: str = Field(default="qp6mKSScYoutYqCOa", description="Apify Google Trends actor ID")
+    apify_actor_id: str = Field(default="nWhM7vTPu16lcwuIg", description="Apify Google Trends FAST actor ID")
     apify_timeout_seconds: int = Field(default=300, description="Timeout for Apify API calls in seconds")
     apify_max_retries: int = Field(default=3, description="Maximum retries for Apify API calls")
     
